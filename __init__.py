@@ -16,6 +16,8 @@ Hardware backends (`nidaqmx`, `pyserial`, `RanLabPythonRepo`) are imported at mo
 AutoSQUID` runs on the **bench PC** where those are installed. The pure modules (`scc`, `analysis`,
 `config`) have no hardware deps and import anywhere for unit tests.
 """
+__version__ = "0.1.0"
+
 from .config import Config
 from .util import clamp
 from .scc import assemble_command, pfl_register, dac_data
@@ -31,6 +33,7 @@ from .tuning import auto_s_tune
 from .plotting import plot_run, clean_trace_names
 
 __all__ = [
+    "__version__",
     "Config",
     "assemble_command", "pfl_register", "dac_data", "clamp",
     "is_surge_spec", "chunk_jump", "format_temp_label",
