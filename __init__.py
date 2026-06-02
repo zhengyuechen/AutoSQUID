@@ -1,0 +1,43 @@
+"""AutoSQUID — shared library for the SQUID measurement-cycle + auto-S-tune notebooks.
+
+Edit values in the notebook (build a Config); call these functions with that cfg. Modules:
+  util        generic helpers (clamp)
+  config      Config dataclass (all knobs + derived paths/register)
+  scc         pure SCC framing (assemble_command, pfl_register, dac_data)
+  analysis    pure detection + I/O (surge/jump, temp label, PCS102 read/write, ledger, resume)
+  serial_io   SCC writes (reset, s_lock/s_tune, set_* DACs)        [pyserial]
+  daq         NI reads + channel detect + chunked acquisition       [nidaqmx]
+  temperature MXC read backend + background logger                  [RanLabPythonRepo]
+  measurement run_cycle state machine (the interval loop lives in the notebook)
+  tuning      auto_s_tune (live-center the locked output near 0 by stepping S-flux; secant search)
+  plotting    plot_run (raw trace + temperature, read from disk)    [matplotlib/pandas]
+
+Hardware backends (`nidaqmx`, `pyserial`, `RanLabPythonRepo`) are imported at module top, so `import
+AutoSQUID` runs on the **bench PC** where those are installed. The pure modules (`scc`, `analysis`,
+`config`) have no hardware deps and import anywhere for unit tests.
+"""
+from .config import Config
+from .util import clamp
+from .scc import assemble_command, pfl_register, dac_data
+from .analysis import (is_surge_spec, chunk_jump, format_temp_label,
+                       save_pcs102, save_temp_csv, read_daq_file,
+                       log_experiment, scan_indices, LEDGER_COLS)
+from .serial_io import (reset, fire_reset, s_lock, s_tune,
+                        set_squid_flux, set_squid_bias, set_array_bias)
+from .daq import daq_read, daq_mean, live_mean, classify, detect_ai_channel, acquire_finite_chunked
+from .temperature import read_temp, TempLogger
+from .measurement import run_cycle, reset_and_verify, resolve_temp_label
+from .tuning import auto_s_tune
+from .plotting import plot_run, clean_trace_names
+
+__all__ = [
+    "Config",
+    "assemble_command", "pfl_register", "dac_data", "clamp",
+    "is_surge_spec", "chunk_jump", "format_temp_label",
+    "save_pcs102", "save_temp_csv", "read_daq_file", "log_experiment", "scan_indices", "LEDGER_COLS",
+    "reset", "fire_reset", "s_lock", "s_tune", "set_squid_flux", "set_squid_bias", "set_array_bias",
+    "daq_read", "daq_mean", "live_mean", "classify", "detect_ai_channel", "acquire_finite_chunked",
+    "read_temp", "TempLogger",
+    "run_cycle", "reset_and_verify", "resolve_temp_label",
+    "auto_s_tune", "plot_run", "clean_trace_names",
+]
