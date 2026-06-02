@@ -78,6 +78,6 @@ whole sweep**. Every acquisition + reset is appended to `experiment_log.txt`.
 **locked**, it steps the SQUID-flux DAC and reads a short finite live-mean each step, using a secant update
 (`dx = (target − mean)/slope`) so the sign and gain are measured, not assumed — no reset between steps.
 Stops when the live mean is within `tol_V` (default 3 mV) of target, or at one DAC LSB. Returns
-`dict(status ∈ {converged, no_response, max_iter}, flux_uA, mean_V, std_V, n_iter)`. At ±1 V the start must
+`dict(status ∈ {converged, no_response, max_iter}, flux_sflux, mean_V, std_V, n_iter)`. At ±1 V the start must
 already be on-scale, or the clipped read returns `no_response` — center roughly by hand first, then run it.
 See the protocol's auto-S-tune section for the full procedure.

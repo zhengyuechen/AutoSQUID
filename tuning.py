@@ -15,12 +15,12 @@ import time
 from .serial_io import set_squid_flux, reset
 from .daq import live_mean
 
-FLUX_MAX = 100.0                 # SQUID-flux DAC full scale (uA), code 0x000-0xFFF
-FLUX_RES = FLUX_MAX / 0xFFF      # one DAC LSB in uA (~0.024) -> "can't move finer" fallback
+FLUX_MAX = 100.0                 # SQUID-flux DAC full scale (sflux), code 0x000-0xFFF
+FLUX_RES = FLUX_MAX / 0xFFF      # one DAC LSB in sflux (~0.024) -> "can't move finer" fallback
 
 
 def auto_s_tune(cfg,
-                start_uA=50.0,
+                start_sflux=10.0,
                 target_V=0.0,
                 tol_V=0.003,        # "centered" band on the live mean (~1.5 x noise std; SEM of a 1 s read is ~0.02 mV)
                 read_s=1.0,         # length of each live-view read (s)
@@ -29,7 +29,7 @@ def auto_s_tune(cfg,
                 settle_s=0.5,
                 reset_first=True): # match the manual flow (center from the live locked state); True = OpenSQUID's 1 reset
     """Live-center the LOCKED SQUID output near target_V by stepping the SQUID-flux DAC.
-    Returns dict(status, flux_uA, mean_V, std_V, n_iter); status in
+    Returns dict(status, flux_sflux, mean_V, std_V, n_iter); status in
     {'converged','no_response','max_iter'}."""
 
     def read(flux):
@@ -37,19 +37,19 @@ def auto_s_tune(cfg,
         flux = max(0.0, min(FLUX_MAX, flux))
         set_squid_flux(cfg, flux); time.sleep(settle_s)
         m = live_mean(cfg, seconds=read_s)
-        print(f"    flux={flux:6.2f} uA  mean={m['mean']*1e3:+7.2f} mV  std={m['std']*1e3:5.2f} mV  "
+        print(f"    flux={flux:6.2f} sflux  mean={m['mean']*1e3:+7.2f} mV  std={m['std']*1e3:5.2f} mV  "
               f"[{m['min']*1e3:+.1f},{m['max']*1e3:+.1f}] mV")
         return flux, m
 
     def result(status, flux, m):
         "Pack the structured outcome + print the verdict."
-        print(f"  {status.upper()} -> flux={flux:.3f} uA, mean={m['mean']*1e3:+.2f} mV")
-        return {"status": status, "flux_uA": flux, "mean_V": m["mean"], "std_V": m["std"], "n_iter": _it}
+        print(f"  {status.upper()} -> flux={flux:.3f} sflux, mean={m['mean']*1e3:+.2f} mV")
+        return {"status": status, "flux_sflux": flux, "mean_V": m["mean"], "std_V": m["std"], "n_iter": _it}
 
     if reset_first:
         reset(cfg); time.sleep(settle_s)
     _it = 0
-    xo, mo = read(start_uA)
+    xo, mo = read(start_sflux)
     if abs(mo["mean"] - target_V) < tol_V:           # already centered
         return result("converged", xo, mo)
     dx = 0.1 * xo if xo else max_step_uA             # first probe = 10% of the start current
@@ -61,7 +61,7 @@ def auto_s_tune(cfg,
             if abs(mc["mean"] - target_V) < tol_V:
                 return result("converged", xc, mc)
             xn, mn = xc, mc                           # drifted; keep iterating from the confirmation read
-        slope = (mn["mean"] - mo["mean"]) / (xn - xo) if xn != xo else 0.0   # local V/uA (sign + gain self-found)
+        slope = (mn["mean"] - mo["mean"]) / (xn - xo) if xn != xo else 0.0   # local V/sflux (sign + gain self-found)
         if abs(slope) < 1e-6:
             return result("no_response", xn, mn)     # flat: not locked / wrong DAQ_AI
         dx = (target_V - mn["mean"]) / slope         # secant step toward target

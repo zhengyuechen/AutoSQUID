@@ -10,13 +10,13 @@ Edit values in the notebook (build a Config); call these functions with that cfg
   temperature MXC read backend + background logger                  [RanLabPythonRepo]
   measurement run_cycle state machine (the interval loop lives in the notebook)
   tuning      auto_s_tune (live-center the locked output near 0 by stepping S-flux; secant search)
-  plotting    plot_run (raw trace + temperature, read from disk)    [matplotlib/pandas]
+  plotting    plot_run / plot_psd (raw trace + temperature; one-sided Welch PSD, read from disk) [matplotlib/pandas]
 
 Hardware backends (`nidaqmx`, `pyserial`, `RanLabPythonRepo`) are imported at module top, so `import
 AutoSQUID` runs on the **bench PC** where those are installed. The pure modules (`scc`, `analysis`,
 `config`) have no hardware deps and import anywhere for unit tests.
 """
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .config import Config
 from .util import clamp
@@ -30,7 +30,7 @@ from .daq import daq_read, daq_mean, live_mean, classify, detect_ai_channel, acq
 from .temperature import read_temp, TempLogger
 from .measurement import run_cycle, reset_and_verify, resolve_temp_label
 from .tuning import auto_s_tune
-from .plotting import plot_run, clean_trace_names
+from .plotting import plot_run, clean_trace_names, plot_overlay, plot_psd
 
 __all__ = [
     "__version__",
@@ -42,5 +42,5 @@ __all__ = [
     "daq_read", "daq_mean", "live_mean", "classify", "detect_ai_channel", "acquire_finite_chunked",
     "read_temp", "TempLogger",
     "run_cycle", "reset_and_verify", "resolve_temp_label",
-    "auto_s_tune", "plot_run", "clean_trace_names",
+    "auto_s_tune", "plot_run", "clean_trace_names", "plot_overlay", "plot_psd",
 ]

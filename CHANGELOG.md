@@ -4,13 +4,31 @@ All notable changes to **AutoSQUID** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
-## [0.1.0] — 2026-06-01
+## [0.1.1][0.1.1] — 2026-06-02
+
+### Added
+
+- **`plotting.plot_psd(path, filename, conversion=1, P=…)`**: one-sided Welch PSD (Φ₀²/Hz) of one trace —
+  splits it into `P` mean-removed, windowed segments and averages them, overlaying each `P` on one log-log
+  axis (normalization verified against `scipy.signal.welch` to ~1e-16). A `clean_only` toggle runs the
+  `is_surge_spec` integrity gate and skips the trace on failure; `conversion` is the per-cooldown Φ₀/V factor.
+- **`plotting.plot_overlay(t, v, temp_t, temp_T)`**: overlay a voltage trace and a continuous MXC-temperature
+  line on one shared time axis (twin y-axes), interpolating the 30 s temperature samples onto the trace grid.
+- **Notebook**: `data_analysis.ipynb` — off-line raw-trace / temperature-overlay / PSD analysis over the package.
+
+### Changed
+
+- **`auto_s_tune`**: renamed the S-flux tunables/return key for clarity — `start_uA`→`start_sflux` and the
+  result key `flux_uA`→`flux_sflux`; default `start_sflux` lowered 50.0 → 10.0 µA.
+
+## [0.1.0][0.1.0] — 2026-06-01
 
 Initial release: the SQUID measurement-cycle + auto-S-tune package, extracted from the earlier
 single-notebook scripts into a small library (`Config` dataclass + focused modules) driven by two thin
 notebooks, with the operating-protocol PDF.
 
 ### Added
+
 - **Package** (`AutoSQUID/`): `config` (the `Config` dataclass — all knobs + derived paths/register),
   `util` (`clamp`), `scc` (SCC framing), `analysis` (surge/jump detection, temperature label, PCS102
   read/write, ledger, resume), `serial_io` (SCC writes), `daq` (NI reads + channel detect + chunked
@@ -28,8 +46,10 @@ notebooks, with the operating-protocol PDF.
   and PFL-102/SCC reference, the reset protocol, the run loop, and the operating + auto-S-tune procedures).
 
 ### Notes
+
 - Runs on the bench PC (`nidaqmx`, `pyserial`, `RanLabPythonRepo`). `vrange = ±1 V` (matches previous
   measurements). Defaults are bench-specific (`port="COM3"`, `user="Shannon"`, the `F:\…` data root) — set
   them per run.
 
+[0.1.1]: https://github.com/zhengyuechen/AutoSQUID/releases/tag/v0.1.1
 [0.1.0]: https://github.com/zhengyuechen/AutoSQUID/releases/tag/v0.1.0

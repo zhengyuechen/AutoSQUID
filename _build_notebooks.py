@@ -116,10 +116,10 @@ print(f"control PORT={cfg.port} ch={cfg.channel} · DAQ_AI={cfg.daq_ai} · vrang
     md("""## §1 — Lock + auto S-tune  *(ACTIVE — sends to the hardware)*
 
 Close PCS102DA on this port first. `auto_s_tune` returns a dict: `status` ∈
-{converged, no_response, max_iter}, plus `flux_uA` / `mean_V` / `std_V` / `n_iter`.
-Tunables: `tol_V` (centered band, default 3 mV), `read_s` (live-view length), `start_uA`, `max_step_uA`.""")
+{converged, no_response, max_iter}, plus `flux_sflux` / `mean_V` / `std_V` / `n_iter`.
+Tunables: `tol_V` (centered band, default 3 mV), `read_s` (live-view length), `start_sflux`, `max_step_uA`.""")
     co(r'''sq.s_lock(cfg)                                   # lock the input SQUID (or do it in PCS102DA)
-res = sq.auto_s_tune(cfg, start_uA=50.0, target_V=0.0, tol_V=0.003)
+res = sq.auto_s_tune(cfg, start_sflux=50.0, target_V=0.0, tol_V=0.003)
 print(res)
 if res["status"] != "converged":
     print("NOT centered — nudge S-flux manually closer / check lock, then re-run.")''')
