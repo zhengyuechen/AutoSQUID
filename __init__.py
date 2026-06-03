@@ -7,23 +7,24 @@ Edit values in the notebook (build a Config); call these functions with that cfg
   analysis    pure detection + I/O (surge/jump, temp label, PCS102 read/write, ledger, resume)
   serial_io   SCC writes (reset, s_lock/s_tune, set_* DACs)        [pyserial]
   daq         NI reads + channel detect + chunked acquisition       [nidaqmx]
-  temperature MXC read backend + background logger                  [RanLabPythonRepo]
+  temperature MXC read via the injected `cfg.temp_reader` + background logger   [no instrument import]
   measurement run_cycle state machine (the interval loop lives in the notebook)
   tuning      auto_s_tune (live-center the locked output near 0 by stepping S-flux; secant search)
   plotting    plot_run / plot_psd (raw trace + temperature; one-sided Welch PSD, read from disk) [matplotlib/pandas]
 
-Hardware backends (`nidaqmx`, `pyserial`, `RanLabPythonRepo`) are imported at module top, so `import
-AutoSQUID` runs on the **bench PC** where those are installed. The pure modules (`scc`, `analysis`,
-`config`) have no hardware deps and import anywhere for unit tests.
+The DAQ + serial backends (`nidaqmx`, `pyserial`) are imported at module top (the package assumes the
+STAR Cryo + NI rig), so `import AutoSQUID` needs those two. The MXC thermometer backend is **not** imported —
+set `cfg.temp_reader` (a `fn(channel)->T in K`) in the notebook, so the temperature source is lab-swappable.
+The pure modules (`scc`, `analysis`, `config`) have no hardware deps and import anywhere for unit tests.
 """
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .config import Config
 from .util import clamp
 from .scc import assemble_command, pfl_register, dac_data
 from .analysis import (is_surge_spec, chunk_jump, format_temp_label,
                        save_pcs102, save_temp_csv, read_daq_file,
-                       log_experiment, scan_indices, LEDGER_COLS)
+                       log_experiment, log_action, scan_indices, LEDGER_COLS)
 from .serial_io import (reset, fire_reset, s_lock, s_tune,
                         set_squid_flux, set_squid_bias, set_array_bias)
 from .daq import daq_read, daq_mean, live_mean, classify, detect_ai_channel, acquire_finite_chunked
@@ -37,7 +38,7 @@ __all__ = [
     "Config",
     "assemble_command", "pfl_register", "dac_data", "clamp",
     "is_surge_spec", "chunk_jump", "format_temp_label",
-    "save_pcs102", "save_temp_csv", "read_daq_file", "log_experiment", "scan_indices", "LEDGER_COLS",
+    "save_pcs102", "save_temp_csv", "read_daq_file", "log_experiment", "log_action", "scan_indices", "LEDGER_COLS",
     "reset", "fire_reset", "s_lock", "s_tune", "set_squid_flux", "set_squid_bias", "set_array_bias",
     "daq_read", "daq_mean", "live_mean", "classify", "detect_ai_channel", "acquire_finite_chunked",
     "read_temp", "TempLogger",

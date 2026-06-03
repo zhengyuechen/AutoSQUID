@@ -6,12 +6,13 @@ dx = (target - mean) / slope (the slope self-finds the sign + gain, which are un
 Stops when the live mean is within tol_v of target (what the eye judges), or when the predicted step is
 below one DAC LSB (can't do better). Reads are finite live views (like OpenSQUID's prepareDc/measureDc,
 not continuous). No reset between steps — flux shifts the locked baseline directly (matches the manual
-flow + OpenSQUID zeroStage1Output). At cfg.vrange = +/-1 V the start must already be on-scale; an
-off-scale (clipped) baseline reads flat, so it returns 'no_response' rather than a false centering.
-LOCK the SQUID first.
+flow + OpenSQUID zeroStage1Output). If the live mean shows no response to the S-flux steps (flat slope), it
+returns 'no_response' rather than a false centering — the SQUID is not locked, DAQ_AI is wrong, or the
+S-flux DAC isn't reaching the SQUID. LOCK the SQUID first.
 """
 import time
 
+from .config import require_fields
 from .serial_io import set_squid_flux, reset
 from .daq import live_mean
 
@@ -27,10 +28,12 @@ def auto_s_tune(cfg,
                 max_step_uA=10.0,   # clamp per step so the lock can't slip a fluxon
                 max_iter=15,
                 settle_s=0.5,
-                reset_first=True): # match the manual flow (center from the live locked state); True = OpenSQUID's 1 reset
+                reset_first=True):
     """Live-center the LOCKED SQUID output near target_V by stepping the SQUID-flux DAC.
     Returns dict(status, flux_sflux, mean_V, std_V, n_iter); status in
-    {'converged','no_response','max_iter'}."""
+    {'converged','dac_limited','no_response','max_iter'} ('dac_limited' = the next step is below one DAC LSB
+    while still outside tol_V, i.e. as centered as the DAC allows, not a true centering)."""
+    require_fields(cfg, ["daq_ai", "port"], "auto_s_tune")
 
     def read(flux):
         "Set flux (clamped to the DAC range), settle, and return a live-view dict; print a one-line summary."
@@ -65,8 +68,8 @@ def auto_s_tune(cfg,
         if abs(slope) < 1e-6:
             return result("no_response", xn, mn)     # flat: not locked / wrong DAQ_AI
         dx = (target_V - mn["mean"]) / slope         # secant step toward target
-        if abs(dx) < FLUX_RES:                       # can't move the DAC any finer -> accept
-            return result("converged", xn, mn)
+        if abs(dx) < FLUX_RES:                       # can't move the DAC any finer (still outside tol_V)
+            return result("dac_limited", xn, mn)
         xo, mo = xn, mn
 
     return result("max_iter", xo, mo)

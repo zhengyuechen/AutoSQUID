@@ -1,5 +1,5 @@
 """Pure analysis + I/O for SQUID traces: surge/jump detection, temperature labels, PCS102 read/write,
-the experiment ledger, and resume bookkeeping.
+the experiment ledger + action log, and resume bookkeeping.
 
 No instrument hardware — numpy + pandas + stdlib only (the detection/label functions need only numpy).
 """
@@ -10,11 +10,13 @@ import numpy as np
 import pandas as pd
 
 
-def is_surge_spec(v, 
-                  win=2000, 
-                  n_baseline_chunks=1, jump_sigma=6.0, rail_v=9.5, first_chunk_v=0.1):
-    """Post-hoc surge detector: rail catch, already-surged first-chunk pre-check,
-    and baseline-deviation |mu_chunk - mu0|/sigma0 > jump_sigma. Returns (bad, reason)."""
+def is_surge_spec(v,
+                  win=2000,
+                  n_baseline_chunks=1, jump_sigma=6.0, rail_v=9.5, first_chunk_v=0.1,
+                  min_std=5e-5, stuck_frac=0.1, stuck_max_frac=0.02):
+    """Post-hoc surge detector: rail catch, already-surged first-chunk pre-check, a stuck/flat catch (a
+    healthy noise trace fluctuates; a frozen one's per-chunk std collapses), and baseline-deviation
+    |mu_chunk - mu0|/sigma0 > jump_sigma. Returns (bad, reason)."""
     v = np.asarray(v, dtype=float)
     if np.max(np.abs(v)) > rail_v:
         return True, f"railed (|V|max={np.max(np.abs(v)):.2f} > {rail_v})"
@@ -24,6 +26,12 @@ def is_surge_spec(v,
     sd = np.array([c.std() for c in chunks])
     if abs(mu[0]) > first_chunk_v:
         return True, f"first-chunk mean {mu[0]:+.3f} V > {first_chunk_v} V (already surged?)"
+    live = float(sd.max())                                  # liveliest chunk's std = the trace's noise level
+    if live < min_std:                                      # no chunk shows real noise -> flat/dead throughout
+        return True, f"flat/dead trace (max chunk std {live:.2e} V < {min_std})"
+    stuck = sd < stuck_frac * live                          # chunks whose noise collapsed vs the live level
+    if stuck.mean() > stuck_max_frac:                       # frozen/stuck over more than stuck_max_frac of the run
+        return True, f"stuck/frozen: {100 * stuck.mean():.0f}% of chunks have std < {stuck_frac:g}x the live level"
     k = min(n_baseline_chunks, nc)
     mu0 = mu[:k].mean()
     sigma0 = max(sd[:k].mean(), 1e-7)
@@ -119,12 +127,24 @@ def log_experiment(path, row):
         f.write("\t".join(str(row.get(c, "")) for c in LEDGER_COLS) + "\n")
 
 
-def scan_indices(outdir, base):
-    """Scan {base}_{k}[_OUTCOME].txt on disk; return (n_clean, next_idx): clean-trace count and the next
-    free order index (max existing index + 1, over clean AND failed) so a resume never overwrites."""
+def log_action(path, action, detail=""):
+    "Append a timestamped action line (reset / reset_fail / bad_baseline / temperature / measurement attempt) to the action log — actions + attempted names only, NEVER measurement results."
+    new = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new:
+            f.write("timestamp\taction\tdetail\n")
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')}\t{action}\t{detail}\n")
+
+
+def scan_indices(outdir, core):
+    """Scan DAQ_[<date>_]{core}_{k}[_OUTCOME].txt on disk for this (interval,temp,npts) `core`, IGNORING the
+    date token, so traces measured on any day in the folder all count; return (n_clean, next_idx): clean-trace
+    count and the next free order index (max existing index + 1, over clean AND failed) so a resume never
+    overwrites and the index stays continuous regardless of the day measured."""
     n_clean = 0; max_idx = 0
-    for p in outdir.glob(f"{base}_*.txt"):
-        m = re.fullmatch(rf"{re.escape(base)}_(\d+)(_[A-Z]+)?\.txt", p.name)
+    pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(core)}_(\d+)(_[A-Z]+)?\.txt")   # optional date token, any day
+    for p in outdir.glob("DAQ_*.txt"):
+        m = pat.fullmatch(p.name)
         if not m:
             continue
         max_idx = max(max_idx, int(m.group(1)))

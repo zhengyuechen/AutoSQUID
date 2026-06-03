@@ -65,7 +65,10 @@ def detect_ai_channel(cfg):
                 live.append(ch)
         except Exception:
             pass
-    daq_ai = next((ch for ch in live if ch.endswith("ai0")), live[0] if live else chans[0])
+    if not live:
+        raise RuntimeError(f"no live AI channel on {dev.name} (probed {len(chans)}): check the SQUID lock / "
+                           "wiring, or pin the channel with cfg.force_ai.")
+    daq_ai = next((ch for ch in live if ch.endswith("ai0")), live[0])
     return dev, daq_ai
 
 
@@ -73,6 +76,12 @@ def acquire_finite_chunked(cfg, channel, n, fs):
     """ONE consecutive FINITE read of n samples, drained in cfg.chunk-point reads with the live chunk_jump
     check (the sample clock is gap-free, so chunking does NOT break the run). Returns
     (v[:got], got, flag|None) where flag=dict(kind,index,time_s,reason), kind in {jump,rail,bad_baseline}."""
+
+    # The FIFO buffer only holds a few thousand samples, so read_many_sample is not going to interrupt the run.
+    # Check out the following on buffers:
+    # https://knowledge.ni.com/KnowledgeArticleDetails?id=kA00Z000000PAraSAG&l=en-US
+    # https://www.ni.com/docs/en-US/bundle/pcie-6320-specs/resource/374459d.pdf
+
     buf = np.empty(n, dtype=np.float64)
     got = 0; mu0 = None; base = []
     with daq_task(cfg, channel, fs, n) as t:
@@ -94,8 +103,8 @@ def acquire_finite_chunked(cfg, channel, n, fs):
                     warnings.filterwarnings("ignore", message=".*200010.*")
                     t.stop()
                 return buf[:got].copy(), got, {
-                    "kind": kind, 
-                    "index": got, 
-                    "time_s": got / fs, 
+                    "kind": kind,
+                    "index": got,
+                    "time_s": got / fs,
                     "reason": reason}
     return buf[:got].copy(), got, None

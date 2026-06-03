@@ -9,15 +9,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from .analysis import read_daq_file, is_surge_spec
+from .config import require_fields
 
 
 def clean_trace_names(cfg):
-    "Every CLEAN trace ({base}_{i}.txt, bare index = no outcome suffix) on disk for cfg's intervals, in acquisition order."
+    "Every CLEAN trace (bare index = no outcome suffix) on disk for cfg's intervals, matched by date-agnostic core (any day), in index order."
     names = []
     for tau in cfg.scan_intervals:
-        base = cfg.base_name(tau)
-        pat = re.compile(rf"{re.escape(base)}_(\d+)\.txt")
-        found = [(int(m.group(1)), p.name) for p in cfg.outdir.glob(f"{base}_*.txt")
+        core = cfg.core_name(tau)
+        pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(core)}_(\d+)\.txt")   # bare index, any date -> a clean trace
+        found = [(int(m.group(1)), p.name) for p in cfg.outdir.glob("DAQ_*.txt")
                  if (m := pat.fullmatch(p.name))]
         names.extend(nm for _, nm in sorted(found))
     return names
@@ -25,6 +26,7 @@ def clean_trace_names(cfg):
 
 def plot_run(cfg, filename_list=None):
     "Plot voltage-vs-time for each clean trace, then MXC temperature-vs-time from each trace's _temp.csv."
+    require_fields(cfg, ["data_root", "user"], "plot_run")
     path = str(cfg.outdir)
     names = filename_list if filename_list is not None else clean_trace_names(cfg)
     if not names:
@@ -109,6 +111,6 @@ def plot_psd(path, filename, conversion=1, P=(10, 100, 1000, 10000), window="han
         if len(phi) // p < 2:                                 # segment too short to FFT -> skip this P
             print(f"  {filename} P={p}: segment < 2 pts, skipped"); continue
         f, S = _psd_welch(phi, dt, p, window)
-        plt.loglog(f, S, lw=0.8, label=f"P={p}")
+        plt.loglog(f[1:], S[1:], lw=0.8, label=f"P={p}")   # drop the f=0 (DC) bin — invalid on a log axis
     plt.xlabel("Frequency (Hz)"); plt.ylabel(r"PSD ($\Phi_0^2$/Hz)")
     plt.title(f"PSD — {filename}"); plt.legend(); plt.tight_layout(); plt.show()

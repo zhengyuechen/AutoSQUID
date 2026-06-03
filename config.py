@@ -6,7 +6,9 @@ computed properties, so there is no stale state to keep in sync.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
+from datetime import datetime
+import os
 
 from .scc import pfl_register
 
@@ -27,7 +29,9 @@ class Config:
 
     # ---- temperature logging ----
     temp_every_s: float = 30.0          # MXC sample period (background thread)
-    temp_channel: int = 6               # MXC mixing-chamber thermometer (read_latest_temp channel)
+    temp_channel: int = 6               # thermometer channel passed to temp_reader
+    temp_reader: Optional[Callable[[int], float]] = None   # LAB-SPECIFIC: set in the notebook to fn(channel)->T in K
+                                        # (e.g. cfg.temp_reader = lambda ch: read_latest_temp(ch)[1]); NOT imported by the package
 
     # ---- control (SCC serial) ----
     port: str = "COM3"                  # control COM port (PCS102DA may stay open on another port to hold S-lock)
@@ -46,12 +50,10 @@ class Config:
     max_attempts: int = 4               # max total acquisitions per interval (clean + failed) before moving on
     force_device: Optional[str] = None  # e.g. 'Dev1' to skip device auto-pick
     force_ai: Optional[str] = None      # e.g. 'Dev1/ai0' to skip channel auto-pick
-    daq_ai: str = "Dev1/ai0"            # NI analog-in carrying the SQUID output (set by detect_ai_channel)
-    user: str = "Shannon"               # data folder owner
+    daq_ai: str = ""            # NI analog-in carrying the SQUID output (set by detect_ai_channel)
+    data_root: str = ""   # data root; outdir = data_root / user / date (set per install)
+    user: str = ""               # data folder owner
     date: str = ""                      # date subfolder ("" = the USER folder itself)
-
-    # ---- environment ----
-    ranlab_path: str = "../../"         # sys.path entry where RanLabPythonRepo lives (for the temperature backend)
 
     # ---- derived ----
     @property
@@ -68,19 +70,30 @@ class Config:
 
     @property
     def base_path(self) -> str:
-        "Lab data root for this user (Windows path), matching the other notebooks."
-        return f"F:\\Dilution Refrigerator Data\\{self.user}\\"
+        "Per-user data folder: data_root / user."
+        return os.path.join(self.data_root, self.user)
 
     @property
     def outdir(self) -> Path:
         "Folder where traces, temp CSVs, and the ledger are written/read (base_path + date)."
-        return Path(self.base_path + self.date)
+        return Path(os.path.join(self.base_path, self.date))
 
     @property
     def register(self) -> int:
         "The PFL feedback register to use (override, else standard SQUID-locked 0x408)."
         return self.register_override if self.register_override is not None else pfl_register(stage1_locked=True)
 
+    def core_name(self, scan_interval_s: float) -> str:
+        "Date-agnostic identifying core, e.g. '100us_14mK_10Mpts' — matches this (interval, temp, npts) trace on ANY date."
+        return f"{int(round(scan_interval_s * 1e6))}us_{self.temp_label}_{self.npts_tag}"
+
     def base_name(self, scan_interval_s: float) -> str:
-        "Filename stem for one interval, e.g. 'DAQ_100us_14mK_10Mpts' (the order index/outcome is appended later)."
-        return f"DAQ_{int(round(scan_interval_s * 1e6))}us_{self.temp_label}_{self.npts_tag}"
+        "WRITE stem for a new trace, e.g. 'DAQ_Jun01_100us_14mK_10Mpts' (date prefix + core; order index/outcome appended later). Existing traces are MATCHED by core_name, which ignores the date."
+        return f"DAQ_{datetime.now().strftime('%b%d')}_{self.core_name(scan_interval_s)}"
+
+
+def require_fields(cfg, names, context):
+    "Raise if any of `names` is unset (None or '') on cfg — call at the top of a function that needs them."
+    missing = [n for n in names if getattr(cfg, n) is None or getattr(cfg, n) == ""]
+    if missing:
+        raise RuntimeError(f"{context}: set cfg.{', cfg.'.join(missing)} before running")

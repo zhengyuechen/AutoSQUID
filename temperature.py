@@ -1,16 +1,19 @@
-"""Bluefors MXC temperature: the read backend (RanLabPythonRepo) + a background logger thread.
+"""MXC temperature: a thin wrapper over a lab-supplied reader + a background logger thread.
 
-Runs on the bench PC where RanLabPythonRepo is importable (the notebook adds its parent to sys.path
-before importing AutoSQUID). Same backend the data-analysis notebooks use.
+The package imports NO thermometer backend. Set `cfg.temp_reader` in the notebook to a callable
+`fn(channel) -> T in K` (our lab wraps RanLabPythonRepo's `read_latest_temp`; another lab supplies its own),
+so `import AutoSQUID` works without any instrument library and the temperature source is swappable per lab.
 """
 import time
 import threading
-from RanLabPythonRepo.python_instruments_measure.Instruments.BF_Therm_and_Heater.BF_TestFns import read_latest_temp
 
 
 def read_temp(cfg):
-    "MXC mixing-chamber temperature in K (read_latest_temp channel cfg.temp_channel; data-analysis convention)."
-    return read_latest_temp(cfg.temp_channel)[1]
+    "MXC temperature in K via the lab-supplied cfg.temp_reader(cfg.temp_channel); errors if it is not set."
+    if cfg.temp_reader is None:
+        raise RuntimeError("cfg.temp_reader is not set — assign a fn(channel)->T(K) in the notebook, "
+                           "e.g. cfg.temp_reader = lambda ch: read_latest_temp(ch)[1]")
+    return cfg.temp_reader(cfg.temp_channel)
 
 
 class TempLogger(threading.Thread):
