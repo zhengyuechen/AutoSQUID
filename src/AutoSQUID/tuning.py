@@ -15,6 +15,7 @@ import time
 from .config import require_fields
 from .serial_io import set_squid_flux, reset
 from .daq import live_mean
+from .analysis import log_action
 
 FLUX_MAX = 100.0                 # SQUID-flux DAC full scale (sflux), code 0x000-0xFFF
 FLUX_RES = FLUX_MAX / 0xFFF      # one DAC LSB in sflux (~0.024) -> "can't move finer" fallback
@@ -23,7 +24,7 @@ FLUX_RES = FLUX_MAX / 0xFFF      # one DAC LSB in sflux (~0.024) -> "can't move 
 def auto_s_tune(cfg,
                 start_sflux=10.0,
                 target_V=0.0,
-                tol_V=0.003,        # "centered" band on the live mean (~1.5 x noise std; SEM of a 1 s read is ~0.02 mV)
+                tol_V=0.020,        # "centered" band on the live mean (~1.5 x noise std; SEM of a 1 s read is ~0.02 mV)
                 read_s=1.0,         # length of each live-view read (s)
                 max_step_uA=10.0,   # clamp per step so the lock can't slip a fluxon
                 max_iter=15,
@@ -45,8 +46,12 @@ def auto_s_tune(cfg,
         return flux, m
 
     def result(status, flux, m):
-        "Pack the structured outcome + print the verdict."
+        "Pack the structured outcome + print the verdict; log the tune action when an output folder is configured."
         print(f"  {status.upper()} -> flux={flux:.3f} sflux, mean={m['mean']*1e3:+.2f} mV")
+        if cfg.data_root and cfg.user:                       # same action_log.txt as run_cycle; skipped in standalone bench use
+            cfg.outdir.mkdir(parents=True, exist_ok=True)
+            log_action(cfg.outdir / "action_log.txt", "S_FLUX",
+                       f"{status}: flux={flux:.2f} uA, mean={m['mean']*1e3:+.2f} mV, n_iter={_it}")
         return {"status": status, "flux_sflux": flux, "mean_V": m["mean"], "std_V": m["std"], "n_iter": _it}
 
     if reset_first:

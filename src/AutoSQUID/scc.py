@@ -3,6 +3,10 @@
 Pure functions (no hardware) — VERBATIM from the OpenSQUID-0.2 GPLv3 source
 (StarCryoSquidInterface.assembleCommand, PFL102._computePflRegister). Importable and unit-testable
 anywhere; the actual serial writes live in serial_io.py.
+
+assemble_command / pfl_register / dac_data are derived from OpenSQUID-0.2,
+Copyright (C) 2012 Felix Jaeckel and Randy Lafler, licensed GPLv3 — so AutoSQUID
+is distributed under GPLv3 (see LICENSE at the repo root).
 """
 from .util import clamp
 

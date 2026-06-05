@@ -4,6 +4,15 @@ All notable changes to **AutoSQUID** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## 0.1.3 — 2026-06-05
+
+### Added
+
+* Added adjusting array flux (`set_array_flux`).
+* Changed naming of the temperature file to `TEMP_{MonDD}_<core>_{i}.csv`.
+* Logged change in s-flux; changed default `tol_V` in `auto_s_tune` to 0.020 (20 mV).
+* **Packaging — installable src layout.** Added `pyproject.toml` (src layout, `src/AutoSQUID/`) so the package is `pip install -e .`-able; moved notebooks → `examples/`, the protocol PDF + wiring diagram → `docs/`; added a **GPLv3** `LICENSE` (the `scc.py` SCC framing is ported from OpenSQUID, GPLv3).
+
 ## [0.1.2][0.1.2] — 2026-06-03
 
 ### Added
@@ -74,8 +83,8 @@ notebooks, with the operating-protocol PDF.
 
 ### Notes
 
-- Runs on the bench PC (`nidaqmx`, `pyserial`, `RanLabPythonRepo`). `vrange = ±1 V` (matches previous
-  measurements). Defaults are bench-specific (`port="COM3"`, `user="Shannon"`, the `F:\…` data root) — set
+- Runs on the bench PC (`nidaqmx`, `pyserial`, + your thermometer backend). `vrange = ±1 V` (matches previous
+  measurements). Defaults are bench-specific (`port="COM3"`, `user=""`, the `F:\…` data root) — set
   them per run.
 
 [0.1.2]: https://github.com/zhengyuechen/AutoSQUID/releases/tag/v0.1.2

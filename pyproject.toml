@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AutoSQUID"
+version = "0.1.3"
+description = "Automated DAQ + flux-lock control for STAR Cryoelectronics PFL-102 SQUID systems"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+authors = [{name = "Zhengyue Chen", email = "jeremychen021015@gmail.com"}]
+keywords = ["SQUID", "magnetometry", "STAR-Cryoelectronics", "PFL-102", "nidaqmx", "DAQ", "condensed-matter"]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "pyserial",
+    "nidaqmx",
+]
+
+[project.urls]
+Homepage = "https://github.com/zhengyuechen/AutoSQUID"
+Repository = "https://github.com/zhengyuechen/AutoSQUID"
+Issues = "https://github.com/zhengyuechen/AutoSQUID/issues"
+
+[tool.setuptools]
+packages = ["AutoSQUID"]
+package-dir = {"" = "src"}   # src layout: the package lives in src/AutoSQUID/

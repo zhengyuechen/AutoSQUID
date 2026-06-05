@@ -25,7 +25,7 @@ def clean_trace_names(cfg):
 
 
 def plot_run(cfg, filename_list=None):
-    "Plot voltage-vs-time for each clean trace, then MXC temperature-vs-time from each trace's _temp.csv."
+    "Plot voltage-vs-time for each clean trace, then MXC temperature-vs-time from each trace's TEMP_*.csv."
     require_fields(cfg, ["data_root", "user"], "plot_run")
     path = str(cfg.outdir)
     names = filename_list if filename_list is not None else clean_trace_names(cfg)
@@ -43,7 +43,7 @@ def plot_run(cfg, filename_list=None):
         plt.show()
 
     for filename in names:
-        temp_path = cfg.outdir / filename.replace(".txt", "_temp.csv")
+        temp_path = cfg.outdir / filename.replace("DAQ", "TEMP", 1).replace(".txt", ".csv")
         if not temp_path.exists():
             print(f"no temp log: {temp_path.name}"); continue
         tdf = pd.read_csv(temp_path)                        # columns: time_s, T_K

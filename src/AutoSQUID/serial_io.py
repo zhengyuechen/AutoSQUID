@@ -45,6 +45,11 @@ def set_squid_flux(cfg, uA):
     _send(cfg, assemble_command(cfg.channel, 0x60, dac_data(uA, 100.0, 0x00)))
 
 
+def set_array_flux(cfg, uA):
+    "Set the array flux (stage-2 offset current), 0-100 uA  (DAC 0x60, sub 0x1)."
+    _send(cfg, assemble_command(cfg.channel, 0x60, dac_data(uA, 100.0, 0x01)))
+
+
 def set_squid_bias(cfg, mA):
     "Set the SQUID bias current, 0-2 mA  (DAC 0x60, sub 0x2)."
     _send(cfg, assemble_command(cfg.channel, 0x60, dac_data(mA, 2.0, 0x02)))

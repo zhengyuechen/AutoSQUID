@@ -1,7 +1,7 @@
 """MXC temperature: a thin wrapper over a lab-supplied reader + a background logger thread.
 
 The package imports NO thermometer backend. Set `cfg.temp_reader` in the notebook to a callable
-`fn(channel) -> T in K` (our lab wraps RanLabPythonRepo's `read_latest_temp`; another lab supplies its own),
+`fn(channel) -> T in K` (each lab supplies its own, wrapping its thermometer API),
 so `import AutoSQUID` works without any instrument library and the temperature source is swappable per lab.
 """
 import time

@@ -3,4 +3,14 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 
-measurement_cycle.ipynb
+# Python build artifacts
+*.egg-info/
+build/
+dist/
+*.whl
+
+# local working notebooks (the committed examples are examples/example_*.ipynb)
+examples/measurement_cycle.ipynb
+examples/test_auto_s_tune.ipynb
+examples/auto_s_tune.ipynb
+examples/data_analysis.ipynb

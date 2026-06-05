@@ -25,7 +25,7 @@ def reset_and_verify(cfg, tries=5, settle_s=0.3):
             time.sleep(settle_s)
             m = daq_read(cfg, cfg.daq_ai, cfg.verify_n, cfg.verify_fs).mean()
             cleared = abs(m) < cfg.baseline_v
-            print(f"    reset try {k}: mean={m:+.4f} V -> {'CLEARED' if cleared else 'still off-zero'}")
+            print(f"    Reset try {k}: mean={m:+.4f} V -> {'CLEARED' if cleared else 'still off-zero'}")
             if cleared:
                 return True
     return False
@@ -80,7 +80,7 @@ def run_cycle(cfg, scan_interval_s):
     if n_clean or i > 1:
         print(f"\n=== {base} · resuming: {n_clean}/{cfg.n_trials} clean on disk; next index {i} ===")
     if not _reset(i, n_clean):
-        print("  reset did not clear (systemic); STOPPING."); return "reset_fail"
+        print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
 
     n_attempts = 0
     while n_clean < cfg.n_trials and n_attempts < cfg.max_attempts:
@@ -112,7 +112,7 @@ def run_cycle(cfg, scan_interval_s):
         if outcome == "CLEAN":        n_clean += 1
         stem = f"{base}_{i}" + (f"_{tag}" if tag else "")
         save_pcs102(cfg.outdir / f"{stem}.txt", v, scan_interval_s)
-        save_temp_csv(cfg.outdir / f"{stem}_temp.csv", tl.samples)
+        save_temp_csv(cfg.outdir / (stem.replace("DAQ", "TEMP", 1) + ".csv"), tl.samples)   # TEMP_<core>_<i>.csv
         Ts = [s[1] for s in tl.samples] or [float("nan")]
         _log(outcome, n_acquired=got, n_clean=n_clean, attempt=i, filename=f"{stem}.txt",
              jump_index=flag["index"] if flag else -1, jump_time_s=f"{flag['time_s']:.3f}" if flag else "",
@@ -123,17 +123,17 @@ def run_cycle(cfg, scan_interval_s):
 
         if outcome == "BAD_BASELINE":
             _action("BAD_BASELINE", reason)
-            print("  bad baseline -> reset is not holding (systemic); STOPPING."); return "reset_fail"
+            print("    Bad baseline -> reset is not holding (systemic); STOPPING."); return "reset_fail"
         if outcome == "CLEAN":
             continue
         if n_clean < cfg.n_trials and n_attempts < cfg.max_attempts and not _reset(i, n_clean):
-            print("  reset did not clear (systemic); STOPPING."); return "reset_fail"
+            print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
 
     if n_clean >= cfg.n_trials:
-        print(f"  DONE: {n_clean}/{cfg.n_trials} clean traces in {n_attempts} acquisition(s) this run.")
+        print(f"    DONE: {n_clean}/{cfg.n_trials} clean traces in {n_attempts} acquisition(s) this run.")
     else:
         _log("BUDGET_EXHAUSTED", n_clean=n_clean, attempt="", jump_index=-1, jump_time_s="", filename="")
-        print(f"  BUDGET EXHAUSTED: {n_clean}/{cfg.n_trials} clean after {cfg.max_attempts} acquisitions; moving on.")
+        print(f"    BUDGET EXHAUSTED: {n_clean}/{cfg.n_trials} clean after {cfg.max_attempts} acquisitions; moving on.")
     return "ok"
 
 
