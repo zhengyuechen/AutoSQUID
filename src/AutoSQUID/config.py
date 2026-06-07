@@ -26,8 +26,12 @@ class Config:
     jump_v: float = 0.5                 # flag a baseline-mean slip >= this (V)
     rail_v: float = 9.5                 # true-rail catch (V); range-agnostic
     baseline_chunks: int = 1            # first chunk(s) set the baseline mean mu0
+    live_jump_check: bool = True        # run the mid-run chunk_jump/rail abort during acquisition
+                                        # (off -> drain the run without it; post-hoc is_surge_spec still gates saves)
 
     # ---- temperature logging ----
+    temp_logger: bool = True            # run the background MXC TempLogger thread during acquisition
+                                        # (off -> no temp thread / TEMP csv; no temp_reader needed for a literal temp_label)
     temp_every_s: float = 30.0          # MXC sample period (background thread)
     temp_channel: int = 6               # thermometer channel passed to temp_reader
     temp_reader: Optional[Callable[[int], float]] = None   # LAB-SPECIFIC: set in the notebook to fn(channel)->T in K
@@ -47,6 +51,7 @@ class Config:
     scan_fs: int = 50_000
     baseline_v: float = 0.10            # |mean| below this = cleared / locked baseline
     vrange: float = 1.0                 # NI AI range (V); +/-1 V matches the previous measurements
+    terminal_config: str = "DIFF"        # NI AI terminal config: "RSE" | "NRSE" | "DIFF".
     max_attempts: int = 4               # max total acquisitions per interval (clean + failed) before moving on
     force_device: Optional[str] = None  # e.g. 'Dev1' to skip device auto-pick
     force_ai: Optional[str] = None      # e.g. 'Dev1/ai0' to skip channel auto-pick

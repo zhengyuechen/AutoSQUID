@@ -34,7 +34,7 @@ def auto_s_tune(cfg,
     Returns dict(status, flux_sflux, mean_V, std_V, n_iter); status in
     {'converged','dac_limited','no_response','max_iter'} ('dac_limited' = the next step is below one DAC LSB
     while still outside tol_V, i.e. as centered as the DAC allows, not a true centering)."""
-    require_fields(cfg, ["daq_ai", "port"], "auto_s_tune")
+    require_fields(cfg, ["daq_ai", "port", "data_root", "user"], "auto_s_tune")
 
     def read(flux):
         "Set flux (clamped to the DAC range), settle, and return a live-view dict; print a one-line summary."
@@ -60,7 +60,8 @@ def auto_s_tune(cfg,
     xo, mo = read(start_sflux)
     if abs(mo["mean"] - target_V) < tol_V:           # already centered
         return result("converged", xo, mo)
-    dx = 0.1 * xo if xo else max_step_uA             # first probe = 10% of the start current
+    dx = -0.1 * xo if xo else max_step_uA             # first probe = 10% BELOW the start current
+    flipped = False                                   # one fallback: if 10% down is flat, try 10% up before giving up
 
     for _it in range(1, max_iter + 1):
         xn, mn = read(max(0.0, min(FLUX_MAX, xo + max(-max_step_uA, min(max_step_uA, dx)))))
@@ -71,7 +72,11 @@ def auto_s_tune(cfg,
             xn, mn = xc, mc                           # drifted; keep iterating from the confirmation read
         slope = (mn["mean"] - mo["mean"]) / (xn - xo) if xn != xo else 0.0   # local V/sflux (sign + gain self-found)
         if abs(slope) < 1e-6:
-            return result("no_response", xn, mn)     # flat: not locked / wrong DAQ_AI
+            if not flipped:                          # first probe flat -> try 10% the OTHER way before giving up
+                flipped = True
+                dx = -dx                             # 10% less -> 10% more, from the same start point
+                continue                             # xo, mo unchanged: probe the other side of start
+            return result("no_response", xn, mn)     # both directions flat: not locked / wrong DAQ_AI
         dx = (target_V - mn["mean"]) / slope         # secant step toward target
         if abs(dx) < FLUX_RES:                       # can't move the DAC any finer (still outside tol_V)
             return result("dac_limited", xn, mn)

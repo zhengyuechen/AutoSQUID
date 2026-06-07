@@ -11,12 +11,15 @@ from nidaqmx.stream_readers import AnalogSingleChannelReader
 
 from .analysis import chunk_jump
 
+_TERM_CFG = {"RSE": TerminalConfiguration.RSE, "NRSE": TerminalConfiguration.NRSE,
+             "DIFF": TerminalConfiguration.DIFF, "DIFFERENTIAL": TerminalConfiguration.DIFF}
+
 
 def daq_task(cfg, channel, fs, n):
     "Create + configure a FINITE single-channel AI task on `channel` at fs Hz for n samples (caller closes)."
     t = nidaqmx.Task()
     t.ai_channels.add_ai_voltage_chan(channel, min_val=-cfg.vrange, max_val=cfg.vrange,
-                                      terminal_config=TerminalConfiguration.RSE)
+                                      terminal_config=_TERM_CFG[getattr(cfg, "terminal_config", "DIFF").upper()])
     t.timing.cfg_samp_clk_timing(fs, sample_mode=AcquisitionType.FINITE, samps_per_chan=n)
     return t
 
@@ -84,18 +87,21 @@ def acquire_finite_chunked(cfg, channel, n, fs):
 
     buf = np.empty(n, dtype=np.float64)
     got = 0; mu0 = None; base = []
+    check = getattr(cfg, "live_jump_check", True)   # cfg.live_jump_check toggles the mid-run abort
     with daq_task(cfg, channel, fs, n) as t:
         reader = AnalogSingleChannelReader(t.in_stream)
         t.start()
         while got < n:
             m = min(cfg.chunk, n - got)
             reader.read_many_sample(buf[got:got + m], number_of_samples_per_channel=m, timeout=m / fs + 10.0)
-            seg = buf[got:got + m]
-            res = chunk_jump(float(seg.mean()), float(np.max(np.abs(seg))), mu0, cfg.jump_v, cfg.rail_v, cfg.baseline_v)
-            if mu0 is None:
-                base.append(float(seg.mean()))
-                if len(base) >= cfg.baseline_chunks:
-                    mu0 = float(np.mean(base))
+            res = None
+            if check:
+                seg = buf[got:got + m]
+                res = chunk_jump(float(seg.mean()), float(np.max(np.abs(seg))), mu0, cfg.jump_v, cfg.rail_v, cfg.baseline_v)
+                if mu0 is None:
+                    base.append(float(seg.mean()))
+                    if len(base) >= cfg.baseline_chunks:
+                        mu0 = float(np.mean(base))
             got += m
             if res:
                 kind, reason = res

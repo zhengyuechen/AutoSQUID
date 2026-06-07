@@ -9,16 +9,16 @@ import time
 import datetime
 import serial
 
-from .analysis import (is_surge_spec, save_pcs102, save_temp_csv, log_experiment, log_action,
+from .analysis import (is_surge_spec, save_pcs102, log_experiment, log_action,
                         scan_indices, format_temp_label)
 from .config import require_fields
 from .serial_io import fire_reset
 from .daq import acquire_finite_chunked, daq_read
-from .temperature import TempLogger, read_temp
+from .temperature import read_temp, temp_logging, log_temp_now, save_temp_log
 
 
 def reset_and_verify(cfg, tries=5, settle_s=0.3):
-    "Fire reset + verify the locked baseline up to `tries` times; True once |mean| < cfg.baseline_v."
+    "Fire reset + verify the locked baseline up to `tries` times; return the reset-try count that cleared the baseline (|mean| < cfg.baseline_v), or 0 if it never cleared within `tries`."
     with serial.Serial(cfg.port, cfg.baud, bytesize=8, parity="N", stopbits=1, timeout=1) as ser:
         for k in range(1, tries + 1):
             fire_reset(ser, cfg)
@@ -27,8 +27,8 @@ def reset_and_verify(cfg, tries=5, settle_s=0.3):
             cleared = abs(m) < cfg.baseline_v
             print(f"    Reset try {k}: mean={m:+.4f} V -> {'CLEARED' if cleared else 'still off-zero'}")
             if cleared:
-                return True
-    return False
+                return k
+    return 0
 
 def resolve_temp_label(cfg):
     "If cfg.temp_label == 'auto', read + validate the MXC temperature and set the rounded label on cfg."
@@ -38,6 +38,20 @@ def resolve_temp_label(cfg):
             raise RuntimeError(f"bad MXC temperature read: {T} (logger down / wrong channel?)")
         cfg.temp_label = format_temp_label(T)
     return cfg.temp_label
+
+
+def _classify_outcome(cfg, v, flag):
+    "Map an acquisition's live flag (or a clean finish) to (outcome, file-tag, reason); tag is ONE token."
+    kind = flag["kind"] if flag else None
+    if kind == "bad_baseline":
+        return "BAD_BASELINE", "BADBASE", flag["reason"]
+    if kind == "rail":
+        return "RAIL", "RAIL", flag["reason"]
+    if kind == "jump":
+        return "JUMP", "JUMP", flag["reason"]
+    surged, sreason = is_surge_spec(v, rail_v=cfg.rail_v, first_chunk_v=cfg.baseline_v)
+    return ("SURGE", "SURGE", sreason) if surged else ("CLEAN", "", "ok")
+
 
 def run_cycle(cfg, scan_interval_s):
     """One scan interval: collect cfg.n_trials CLEAN traces within cfg.max_attempts real acquisitions.
@@ -66,10 +80,11 @@ def run_cycle(cfg, scan_interval_s):
         log_action(actionlog, action, detail)
 
     def _reset(tag, n_clean):
-        "reset_and_verify (counts toward n_resets); log RESET/RESET_FAIL with the upcoming index. Returns ok."
+        "reset_and_verify (counts toward n_resets); log RESET with the #tries it took to clear / RESET_FAIL. Returns ok."
         nonlocal n_resets
-        ok = reset_and_verify(cfg); n_resets += 1
-        _action("RESET" if ok else "RESET_FAIL", f"attempt {tag}")
+        ntry = reset_and_verify(cfg); n_resets += 1
+        ok = ntry > 0
+        _action("RESET" if ok else "RESET_FAIL", f"{ntry} tries" if ok else "not cleared")
         if not ok:
             _log("RESET_FAIL", n_clean=n_clean, attempt=tag, filename="")
         return ok
@@ -83,57 +98,53 @@ def run_cycle(cfg, scan_interval_s):
         print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
 
     n_attempts = 0
-    while n_clean < cfg.n_trials and n_attempts < cfg.max_attempts:
-        print(f"\n=== {base} · index {i} · {n_attempts}/{cfg.max_attempts} used · {n_clean}/{cfg.n_trials} clean · "
+
+    def _attempt(idx):
+        "One acquisition: banner -> acquire -> classify -> save -> log -> result line; updates counts; returns outcome."
+        nonlocal n_clean, n_attempts
+        print(f"\n=== {base} · index {idx} · {n_attempts}/{cfg.max_attempts} used · {n_clean}/{cfg.n_trials} clean · "
               f"{cfg.n_points} pts @ {fs:.0f} Hz (~{est:.0f} s) ===")
         _t0 = datetime.datetime.now()
         print(f"    start {_t0:%H:%M:%S} · expected done ~{_t0 + datetime.timedelta(seconds=est):%H:%M:%S}  (~{est:.0f} s)")
-        try:
-            T_now = read_temp(cfg)                             # MXC temperature just before this attempt
-            _action("TEMP", f"{T_now:.4f} K" if T_now is not None else "read failed (None)")
-        except Exception as e:
-            _action("TEMP", f"read failed ({e})")
-        _action("MEASURE", f"{base}_{i}")                     # attempted name + index (no result)
-        tl = TempLogger(cfg); tl.start(); t0 = time.time()
-        try:
+        log_temp_now(cfg, _action)                            # one-shot MXC TEMP action line (no-op if temp_logger off)
+        _action("MEASURE", f"{base}_{idx}")                   # attempted name + index (no result)
+        t0 = time.time()
+        with temp_logging(cfg) as tl:                         # background MXC logger (no-op if temp_logger off)
             v, got, flag = acquire_finite_chunked(cfg, cfg.daq_ai, cfg.n_points, fs)
-        finally:
-            tl.stop(); tl.join(timeout=cfg.temp_every_s + 5)
-
-        kind = flag["kind"] if flag else None        # classify -> (outcome, file tag, reason); tag is ONE token
-        if   kind == "bad_baseline": outcome, tag, reason = "BAD_BASELINE", "BADBASE", flag["reason"]
-        elif kind == "rail":         outcome, tag, reason = "RAIL", "RAIL", flag["reason"]
-        elif kind == "jump":         outcome, tag, reason = "JUMP", "JUMP", flag["reason"]
-        else:
-            surged, sreason = is_surge_spec(v, rail_v=cfg.rail_v, first_chunk_v=cfg.baseline_v)
-            outcome, tag, reason = ("SURGE", "SURGE", sreason) if surged else ("CLEAN", "", "ok")
-
+        outcome, tag, reason = _classify_outcome(cfg, v, flag)
         if outcome != "BAD_BASELINE": n_attempts += 1
         if outcome == "CLEAN":        n_clean += 1
-        stem = f"{base}_{i}" + (f"_{tag}" if tag else "")
+        stem = f"{base}_{idx}" + (f"_{tag}" if tag else "")
         save_pcs102(cfg.outdir / f"{stem}.txt", v, scan_interval_s)
-        save_temp_csv(cfg.outdir / (stem.replace("DAQ", "TEMP", 1) + ".csv"), tl.samples)   # TEMP_<core>_<i>.csv
+        save_temp_log(cfg, cfg.outdir / (stem.replace("DAQ", "TEMP", 1) + ".csv"), tl.samples)   # TEMP_<core>_<idx>.csv (no-op if off)
         Ts = [s[1] for s in tl.samples] or [float("nan")]
-        _log(outcome, n_acquired=got, n_clean=n_clean, attempt=i, filename=f"{stem}.txt",
+        _log(outcome, n_acquired=got, n_clean=n_clean, attempt=idx, filename=f"{stem}.txt",
              jump_index=flag["index"] if flag else -1, jump_time_s=f"{flag['time_s']:.3f}" if flag else "",
              mean_V=f"{v.mean():.6f}", std_V=f"{v.std():.6f}", T_start_K=f"{Ts[0]:.6f}", T_end_K=f"{Ts[-1]:.6f}")
-        print(f"    {outcome} ({reason}) · idx {i} · N={got} · {time.time()-t0:.0f}s · "
+        print(f"    {outcome} ({reason}) · idx {idx} · N={got} · {time.time()-t0:.0f}s · "
               f"mean={v.mean():+.4f} std={v.std():.4f} V · T {Ts[0]:.4f}->{Ts[-1]:.4f} K · {n_clean}/{cfg.n_trials} clean")
-        i += 1
-
         if outcome == "BAD_BASELINE":
             _action("BAD_BASELINE", reason)
+        return outcome
+
+    def _summary():
+        "Final per-interval status: DONE, or BUDGET_EXHAUSTED (logs the exhausted ledger row)."
+        if n_clean >= cfg.n_trials:
+            print(f"    DONE: {n_clean}/{cfg.n_trials} clean traces in {n_attempts} acquisition(s) this run.")
+        else:
+            _log("BUDGET_EXHAUSTED", n_clean=n_clean, attempt="", jump_index=-1, jump_time_s="", filename="")
+            print(f"    BUDGET EXHAUSTED: {n_clean}/{cfg.n_trials} clean after {cfg.max_attempts} acquisitions; moving on.")
+
+    while n_clean < cfg.n_trials and n_attempts < cfg.max_attempts:
+        outcome = _attempt(i)
+        i += 1
+        if outcome == "BAD_BASELINE":
             print("    Bad baseline -> reset is not holding (systemic); STOPPING."); return "reset_fail"
         if outcome == "CLEAN":
             continue
         if n_clean < cfg.n_trials and n_attempts < cfg.max_attempts and not _reset(i, n_clean):
             print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
-
-    if n_clean >= cfg.n_trials:
-        print(f"    DONE: {n_clean}/{cfg.n_trials} clean traces in {n_attempts} acquisition(s) this run.")
-    else:
-        _log("BUDGET_EXHAUSTED", n_clean=n_clean, attempt="", jump_index=-1, jump_time_s="", filename="")
-        print(f"    BUDGET EXHAUSTED: {n_clean}/{cfg.n_trials} clean after {cfg.max_attempts} acquisitions; moving on.")
+    _summary()
     return "ok"
 
 

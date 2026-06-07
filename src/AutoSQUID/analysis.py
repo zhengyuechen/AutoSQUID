@@ -128,7 +128,7 @@ def log_experiment(path, row):
 
 
 def log_action(path, action, detail=""):
-    "Append a timestamped action line (reset / reset_fail / bad_baseline / temperature / measurement attempt) to the action log — actions + attempted names only, NEVER measurement results."
+    "Append a timestamped action line (reset / reset_fail / bad_baseline / temperature / measurement attempt / s_tune) to the action log — actions + attempted names only, NEVER measurement results."
     new = not os.path.exists(path)
     with open(path, "a") as f:
         if new:

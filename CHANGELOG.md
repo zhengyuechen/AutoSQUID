@@ -4,6 +4,32 @@ All notable changes to **AutoSQUID** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## 0.1.4 — 2026-06-07
+
+### Added
+
+* **`Config.terminal_config`** (`"RSE"` | `"NRSE"` | `"DIFF"`, default `"DIFF"`): NI analog-input terminal configuration, now applied in `daq.daq_task` (was hard-coded RSE). `DIFF` reads the SQUID output differentially (ai0/ai8) and rejects common-mode pickup; `NRSE` references AI SENSE. Lets the read mode match the wiring without editing library source.
+* **`Config.temp_logger`** (bool, default `True`): toggles the background MXC `TempLogger` thread during acquisition. When `False`, `run_cycle` starts no temperature thread and writes no per-trace `TEMP_*.csv`, and a literal `temp_label` then needs no `temp_reader` — for quick acquisition-only runs.
+* **`Config.live_jump_check`** (bool, default `True`): toggles the mid-run `chunk_jump`/rail abort inside `daq.acquire_finite_chunked`. When `False`, the single gap-free run drains to completion without the per-chunk check; the post-hoc `is_surge_spec` integrity gate on the saved trace is unchanged.
+* **`example_measurement_cycle.ipynb`**: the §0 `Config` cell now exposes `temp_logger` and `live_jump_check`.
+
+### Changed
+
+* **Temperature-logger gating extracted into `temperature.py`** (`temp_logging` context manager + `log_temp_now` / `save_temp_log`): `run_cycle` wraps the acquisition in `with temp_logging(cfg) as tl:` and calls the two helpers — which auto-detect `cfg.temp_logger` — instead of repeated inline `if cfg.temp_logger:` blocks. No behavior change.
+* **`run_cycle` slimmed to scannable control flow** (`measurement.py`): the per-attempt body (banner → acquire → classify → save → log → result line) moved into an inner `_attempt(idx)` closure, the end-of-interval status into `_summary()`, and the outcome mapping into a new module-level pure helper `_classify_outcome(cfg, v, flag) -> (outcome, tag, reason)`. The interval loop is now just resume → reset → `_attempt`/`_reset` → `_summary`. No behavior or console-output change.
+* **`auto_s_tune` probes 10% *down*, then 10% *up* on no response** (`tuning.auto_s_tune`): the initial secant probe is 10% *below* `start_sflux` (`dx = -0.1·start_sflux`); if that probe comes back flat (e.g. the output is pinned/saturated below the start point), it now retries once 10% *above* `start_sflux` from the same start before returning `no_response`, instead of giving up on the first flat probe. The secant update still self-finds the sign, so convergence on a healthy lock is unchanged.
+* **`auto_s_tune` now requires `data_root` and `user`** (`config.require_fields`): the up-front check is `daq_ai`/`port`/`data_root`/`user` (was `daq_ai`/`port`), so the tune always has a valid `action_log.txt` destination and fails fast instead of running without recording where its S-flux result went.
+
+### Fixed
+
+* **`run_cycle` action log** (`measurement._reset` / `reset_and_verify`): the `RESET` detail now records **how many reset tries it took to bring the baseline below `cfg.baseline_v`** (e.g. `2 tries`; `RESET_FAIL` logs `not cleared`), instead of the upcoming trace index — which read like a reset counter but wasn't (a single reset on a resume logged a misleading `attempt 2`). `reset_and_verify` now returns that clearing-try count (`0` if it never cleared within `tries`) rather than a bare bool; truthiness is unchanged (`0` is falsy), so `if reset_and_verify(...)` callers still work. The ledger's `attempt` field (on-disk trace index, consistent with the measurement rows) is unchanged.
+
+### Docs
+
+* Updated the README and operating protocol for differential input configuration,
+  optional temperature logging and live checks, reset-try action logging, and the
+  revised auto-S-tune requirements/probe sequence.
+
 ## 0.1.3 — 2026-06-05
 
 ### Added
