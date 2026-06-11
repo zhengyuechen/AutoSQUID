@@ -6,35 +6,50 @@ No instrument hardware — numpy + pandas + stdlib only (the detection/label fun
 import os
 import re
 import datetime
+from pathlib import Path
 import numpy as np
 import pandas as pd
+
+
+def _chunk_stats(v, win=2000, n_baseline_chunks=1):
+    """Split v into ~win-point chunks; return (chunks, mu, sd, amax, mu0, sigma0): the chunk views,
+    per-chunk mean/std/max|.|, and the baseline mean/std over the first n_baseline_chunks chunks.
+    The single lower-level analysis shared by is_surge_spec and usable_points_from_spec so they cannot
+    drift (one decides whether the WHOLE trace fails, the other WHERE the failure begins)."""
+    v = np.asarray(v, dtype=float)
+    nc = max(len(v) // win, 1)
+    chunks = np.array_split(v, nc)
+    mu = np.array([c.mean() for c in chunks])
+    sd = np.array([c.std() for c in chunks])
+    amax = np.array([float(np.max(np.abs(c))) for c in chunks])
+    k = min(n_baseline_chunks, nc)
+    mu0 = float(mu[:k].mean())
+    sigma0 = max(float(sd[:k].mean()), 1e-7)
+    return chunks, mu, sd, amax, mu0, sigma0
 
 
 def is_surge_spec(v,
                   win=2000,
                   n_baseline_chunks=1, jump_sigma=6.0, rail_v=9.5, first_chunk_v=0.1,
                   min_std=5e-5, stuck_frac=0.1, stuck_max_frac=0.02):
-    """Post-hoc surge detector: rail catch, already-surged first-chunk pre-check, a stuck/flat catch (a
-    healthy noise trace fluctuates; a frozen one's per-chunk std collapses), and baseline-deviation
-    |mu_chunk - mu0|/sigma0 > jump_sigma. Returns (bad, reason)."""
+    """Post-hoc surge detector (whether the WHOLE trace fails): rail catch, already-surged first-chunk
+    pre-check, a stuck/flat catch (a healthy noise trace fluctuates; a frozen one's per-chunk std
+    collapses), and baseline-deviation |mu_chunk - mu0|/sigma0 > jump_sigma. Returns (bad, reason)."""
     v = np.asarray(v, dtype=float)
-    if np.max(np.abs(v)) > rail_v:
-        return True, f"railed (|V|max={np.max(np.abs(v)):.2f} > {rail_v})"
-    nc = max(len(v) // win, 1)
-    chunks = np.array_split(v, nc)
-    mu = np.array([c.mean() for c in chunks])
-    sd = np.array([c.std() for c in chunks])
+    if len(v) == 0:
+        return True, "empty/dead trace (0 points)"
+    chunks, mu, sd, amax, mu0, sigma0 = _chunk_stats(v, win, n_baseline_chunks)
+    nc = len(mu)
+    if float(amax.max()) > rail_v:
+        return True, f"railed (|V|max={float(amax.max()):.2f} > {rail_v})"
     if abs(mu[0]) > first_chunk_v:
         return True, f"first-chunk mean {mu[0]:+.3f} V > {first_chunk_v} V (already surged?)"
-    live = float(sd.max())                                  # liveliest chunk's std = the trace's noise level
+    live = float(np.percentile(sd, 95))                     # trace's noise level, robust to a few spuriously-noisy chunks
     if live < min_std:                                      # no chunk shows real noise -> flat/dead throughout
         return True, f"flat/dead trace (max chunk std {live:.2e} V < {min_std})"
     stuck = sd < stuck_frac * live                          # chunks whose noise collapsed vs the live level
     if stuck.mean() > stuck_max_frac:                       # frozen/stuck over more than stuck_max_frac of the run
         return True, f"stuck/frozen: {100 * stuck.mean():.0f}% of chunks have std < {stuck_frac:g}x the live level"
-    k = min(n_baseline_chunks, nc)
-    mu0 = mu[:k].mean()
-    sigma0 = max(sd[:k].mean(), 1e-7)
     dev = np.abs(mu - mu0) / sigma0
     if dev.max() > jump_sigma:
         return True, f"baseline deviation {dev.max():.1f} sigma0 at chunk {int(dev.argmax())}/{nc}"
@@ -54,6 +69,84 @@ def chunk_jump(seg_mean, seg_absmax, mu0, jump_v=1.0, rail_v=9.5, baseline_v=0.1
         return ("rail", f"railed (|V|max={seg_absmax:.2f} > {rail_v})")
     if abs(seg_mean - mu0) > jump_v:
         return ("jump", f"{jump_v:g} V jump (|d-mu|={abs(seg_mean - mu0):.3f} V)")
+    return None
+
+
+def usable_points_from_spec(v, win=2000, n_baseline_chunks=1, jump_v=0.5, rail_v=9.5, stuck_frac=0.1,
+                            min_std=5e-5, gap_tol=3):
+    """POST-HOC clean-prefix locator (runs after ANY acquisition that completed without a live flag —
+    a slip the live check missed, or any run drained with live checking off — plus plotting; when a live
+    flag fired the run stopped at that chunk with no persistence and this is NOT called). INDEPENDENT of
+    is_surge_spec (they only share
+    `_chunk_stats`): scans every chunk with ABSOLUTE thresholds — rail_v, |mu-mu0| > jump_v, or freeze vs
+    a robust 95th-pct noise level — and cuts at the ONSET OF THE PERSISTENT failing run that reaches the
+    end, walking back from the end and tolerating up to `gap_tol` isolated clean chunks. A latched
+    jump/rail/freeze is cut; a transient that RECOVERS is kept (full). An empty trace, or one whose
+    robust noise level is below `min_std` (flat/dead throughout), returns (0, 'dead', reason). Returns
+    (usable_points, kind, reason) with kind in {None (full), 'jump','rail','frozen','dead'}."""
+    v = np.asarray(v, dtype=float)
+    if len(v) == 0:
+        return 0, "dead", "empty/dead trace (0 points)"
+    chunks, mu, sd, amax, mu0, sigma0 = _chunk_stats(v, win, n_baseline_chunks)
+    nc = len(mu); base_k = min(n_baseline_chunks, nc)
+    live = float(np.percentile(sd, 95))                    # robust noise level (matches is_surge_spec)
+    if live < min_std:                                     # whole trace flat/dead -> no clean prefix to keep
+        return 0, "dead", f"flat/dead trace (noise {live:.2e} V < {min_std:g})"
+    railed = amax > rail_v
+    stepped = np.abs(mu - mu0) > jump_v                    # absolute step off baseline, like chunk_jump
+    frozen = sd < stuck_frac * live
+    bad = railed | stepped | frozen
+    bad[:base_k] = False                                  # the baseline window is the reference
+    cut_chunk = nc; clean_run = 0                          # onset of the persistent failing run reaching the end
+    for i in range(nc - 1, base_k - 1, -1):
+        if bad[i]:
+            clean_run = 0; cut_chunk = i
+        else:
+            clean_run += 1
+            if clean_run > gap_tol:                        # more than gap_tol clean chunks -> failure (if any) recovered here
+                break
+    if cut_chunk == nc:                                    # no persistent trailing failure -> full trace
+        return len(v), None, "ok"
+    n_use = int(sum(len(c) for c in chunks[:cut_chunk]))
+    j = cut_chunk
+    if railed[j]:
+        kind, reason = "rail", f"railed (|V|max={amax[j]:.2f} > {rail_v})"
+    elif stepped[j]:
+        kind, reason = "jump", f"{abs(mu[j] - mu0):.2f} V step off baseline (> {jump_v} V)"
+    else:
+        kind, reason = "frozen", f"frozen (chunk std {sd[j]:.2e} < {stuck_frac:g}x live)"
+    return n_use, kind, reason
+
+
+def truncate_to_clean(v, fs, **locator_kw):
+    """Truncate a trace to its clean pre-failure prefix (located POST-HOC by usable_points_from_spec — no
+    live flag, so this works on already-saved traces / live-off). Extra kwargs (jump_v, rail_v,
+    n_baseline_chunks, …) pass through to the locator. Returns (clean_v, usable_points, usable_seconds,
+    kind, reason); kind is None for a full clean trace."""
+    n_use, kind, reason = usable_points_from_spec(v, **locator_kw)
+    return v[:n_use], n_use, n_use / fs, kind, reason
+
+
+def fmt_npts(n):
+    """Filename point-count tag: '10Mpts' for a whole number of millions, else floored to 0.1 M with 'p'
+    for the decimal (e.g. 8_454_000 -> '8p4Mpts'); a sub-0.1 M count falls back to '<n>pts'."""
+    if n % 1_000_000 == 0:
+        return f"{n // 1_000_000}Mpts"
+    tenths = n // 100_000                                 # floor to 0.1 M
+    return f"{tenths // 10}p{tenths % 10}Mpts" if tenths else f"{n}pts"
+
+
+def parse_npts(tag):
+    """Inverse of fmt_npts: a point-count tag -> integer points (floored value). None if unrecognized.
+    '10Mpts'->10_000_000, '8p4Mpts'->8_400_000, '20000pts'->20000."""
+    if tag.endswith("Mpts"):
+        body = tag[:-4]
+        if "p" in body:
+            whole, frac = body.split("p")
+            return (int(whole) * 10 + int(frac)) * 100_000
+        return int(body) * 1_000_000
+    if tag.endswith("pts"):
+        return int(tag[:-3])
     return None
 
 
@@ -113,13 +206,43 @@ def read_daq_file(path, filename):
     return header_info, df
 
 
-LEDGER_COLS = ["timestamp", "scan_interval_us", "n_target", "n_acquired", "n_clean", "attempt",
-               "outcome", "jump_index", "jump_time_s", "n_resets", "mean_V", "std_V",
-               "T_start_K", "T_end_K", "filename"]
+LEDGER_COLS = ["timestamp", "scan_interval_us", "n_target", "n_clean", "attempt",
+               "event", "outcome", "usable_points", "usable_seconds", "accepted", "n_resets",
+               "mean_V", "std_V", "T_start_K", "T_end_K", "filename"]
+
+
+def _migrate_ledger(path):
+    """If `path` is an existing ledger predating the 0.2 column schema, migrate it IN PLACE: back up to
+    `<path>.bak`, then rewrite every row realigned to LEDGER_COLS BY NAME (removed columns dropped, new
+    columns blank), deriving `accepted="1"` for pre-0.2 `outcome=="CLEAN"` rows so existing clean traces
+    still count on resume. Idempotent — a current-schema (or absent) ledger is left untouched. Runs on
+    both the read path (`accepted_trace_names`, before resume counts) and the write path
+    (`log_experiment`, before appending), so an old folder is upgraded whichever happens first."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        lines = f.read().splitlines()
+    if not lines or lines[0].split("\t") == LEDGER_COLS:
+        return
+    old_cols = lines[0].split("\t")
+    with open(f"{path}.bak", "w") as b:                        # f-string -> Path-safe (no str + Path)
+        b.write("\n".join(lines) + "\n")
+    with open(path, "w") as f:
+        f.write("\t".join(LEDGER_COLS) + "\n")
+        for line in lines[1:]:
+            rec = dict(zip(old_cols, line.split("\t")))
+            if not rec.get("accepted") and rec.get("outcome") == "CLEAN":
+                rec["accepted"] = "1"                          # pre-0.2 clean trace -> counts on resume
+            f.write("\t".join(rec.get(c, "") for c in LEDGER_COLS) + "\n")
+    print(f"[AutoSQUID] migrated ledger {len(old_cols)}->{len(LEDGER_COLS)} cols "
+          f"({path}); pre-0.2 rows backed up to {path}.bak")
 
 
 def log_experiment(path, row):
-    """Append one attempt as a tab-separated row to the experiment ledger (writes header if new)."""
+    """Append one attempt as a tab-separated row to the experiment ledger (writes header if new). A
+    pre-0.2 ledger in the folder is migrated first (see _migrate_ledger) so the appended 16-column row
+    never produces a ragged file."""
+    _migrate_ledger(path)
     new = not os.path.exists(path)
     with open(path, "a") as f:
         if new:
@@ -136,18 +259,42 @@ def log_action(path, action, detail=""):
         f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')}\t{action}\t{detail}\n")
 
 
-def scan_indices(outdir, core):
-    """Scan DAQ_[<date>_]{core}_{k}[_OUTCOME].txt on disk for this (interval,temp,npts) `core`, IGNORING the
-    date token, so traces measured on any day in the folder all count; return (n_clean, next_idx): clean-trace
-    count and the next free order index (max existing index + 1, over clean AND failed) so a resume never
-    overwrites and the index stays continuous regardless of the day measured."""
-    n_clean = 0; max_idx = 0
-    pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(core)}_(\d+)(_[A-Z]+)?\.txt")   # optional date token, any day
+def accepted_trace_names(outdir, id_core, ledger_name="experiment_log.txt"):
+    """Filenames the EXPERIMENT LEDGER recorded as accepted (`accepted`==1) for this (interval,temp)
+    `id_core` whose file still exists on disk, in index order. Exact (uses the ledger's accepted flag, set
+    from the precise usable_points at write time — immune to filename rounding)."""
+    outdir = Path(outdir)
+    ledger = outdir / ledger_name
+    if not ledger.exists():
+        return []
+    _migrate_ledger(ledger)                                   # upgrade a pre-0.2 folder before counting
+    try:
+        df = pd.read_csv(ledger, sep="\t", dtype=str)
+    except Exception:                                      # noqa: BLE001
+        return []
+    if "accepted" not in df.columns or "filename" not in df.columns:
+        return []
+    pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(id_core)}_[0-9pM]+pts_(\d+)(?:_[A-Z]+)?\.txt")
+    by_idx = {}
+    for fn, acc in zip(df["filename"].fillna(""), df["accepted"].fillna("")):
+        m = pat.fullmatch(str(fn))
+        if str(acc) == "1" and m and (outdir / str(fn)).exists():
+            by_idx[int(m.group(1))] = str(fn)              # by index -> dedup if the same file logged twice
+    return [by_idx[k] for k in sorted(by_idx)]
+
+
+def scan_indices(outdir, id_core, ledger_name="experiment_log.txt"):
+    """Resume bookkeeping for this (interval,temp) `id_core`. Returns (n_clean, next_idx):
+    n_clean = the EXACT count of accepted trials from the ledger whose file still exists (uses the ledger's
+    accepted/usable_points, so a custom min_usable_frac never miscounts via filename rounding);
+    next_idx = max index on the FILESYSTEM + 1 (so a resume never overwrites ANY existing trace, ledgered
+    or not, on any date)."""
+    outdir = Path(outdir)
+    n_clean = len(accepted_trace_names(outdir, id_core, ledger_name))
+    pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(id_core)}_[0-9pM]+pts_(\d+)(?:_[A-Z]+)?\.txt")
+    max_idx = 0
     for p in outdir.glob("DAQ_*.txt"):
         m = pat.fullmatch(p.name)
-        if not m:
-            continue
-        max_idx = max(max_idx, int(m.group(1)))
-        if m.group(2) is None:
-            n_clean += 1
+        if m:
+            max_idx = max(max_idx, int(m.group(1)))
     return n_clean, max_idx + 1

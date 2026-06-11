@@ -3,24 +3,19 @@
 Reads everything back from OUTDIR, so it works after a kernel restart and never holds the big arrays in
 memory. Hardware-free (matplotlib + pandas).
 """
-import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from .analysis import read_daq_file, is_surge_spec
+from .analysis import read_daq_file, is_surge_spec, usable_points_from_spec, accepted_trace_names
 from .config import require_fields
 
 
 def clean_trace_names(cfg):
-    "Every CLEAN trace (bare index = no outcome suffix) on disk for cfg's intervals, matched by date-agnostic core (any day), in index order."
+    "Every ACCEPTED clean trace for cfg's intervals — exactly the ones the ledger counted toward n_trials (via accepted_trace_names), so plotting-selection matches acquisition counting. Index order."
     names = []
     for tau in cfg.scan_intervals:
-        core = cfg.core_name(tau)
-        pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(core)}_(\d+)\.txt")   # bare index, any date -> a clean trace
-        found = [(int(m.group(1)), p.name) for p in cfg.outdir.glob("DAQ_*.txt")
-                 if (m := pat.fullmatch(p.name))]
-        names.extend(nm for _, nm in sorted(found))
+        names.extend(accepted_trace_names(cfg.outdir, cfg.id_core(tau)))
     return names
 
 
@@ -51,6 +46,30 @@ def plot_run(cfg, filename_list=None):
         plt.plot(tdf["time_s"], tdf["T_K"], "o-", ms=3)
         plt.xlabel("Time (s)"); plt.ylabel("MXC T (K)"); plt.title(temp_path.name)
         plt.show()
+
+def plot_usable(path, filename, usable_s=None, show_dropped=True):
+    """Plot only the USABLE (clean, pre-jump) part of a saved JUMP trace. `usable_s` = the clean-prefix
+    duration in seconds (e.g. the experiment log's `usable_seconds`); if None it is located with
+    `usable_points_from_spec`. SURGE files are skipped (a surge has no usable part). `show_dropped` draws
+    the discarded post-jump tail faintly for context. Returns (usable_points, usable_seconds)."""
+    if "_SURGE" in filename:
+        print(f"{filename}: surged -> not usable; skipping"); return 0, 0.0
+    header, df = read_daq_file(path, filename)
+    dt = header["SCANINTVAL"]
+    v = df["CHAN_01(V)"].to_numpy()
+    t = (df.index.to_numpy() - 1) * dt                       # 1-based POINT index -> time from 0
+    n_use = int(round(usable_s / dt)) if usable_s is not None else usable_points_from_spec(v)[0]
+    n_use = max(0, min(n_use, len(v)))
+    plt.figure(figsize=(11, 3.4))
+    if show_dropped and n_use < len(v):
+        plt.plot(t[n_use:], v[n_use:], lw=0.4, color="lightgray", label="dropped (post-jump)")
+    plt.plot(t[:n_use], v[:n_use], lw=0.4, color="steelblue",
+             label=f"usable {n_use * dt:.1f} s ({n_use:,} pts)")
+    plt.xlabel("Time (s)"); plt.ylabel("Array Voltage (V)")
+    plt.title(f"{filename} — usable part"); plt.legend(loc="upper right")
+    plt.tight_layout(); plt.show()
+    return n_use, n_use * dt
+
 
 def plot_overlay(t, v, temp_t, temp_T, title=""):
     """Overlay voltage (t,v) and a CONTINUOUS temperature line on one shared time axis."""
@@ -94,7 +113,7 @@ def _psd_welch(phi, dt, P, window):
 
 
 def plot_psd(path, filename, conversion=1, P=(10, 100, 1000, 10000), window="hanning", clean_only=True):
-    "One-sided Welch PSD (Phi_0^2/Hz) of one trace, overlaying every segment count in P on one log-log axis; clean_only gates the trace with is_surge_spec (skips it on failure); conversion is the per-cooldown Phi_0/V factor."
+    "One-sided Welch PSD (f_0^2/Hz) of one trace, overlaying every segment count in P on one log-log axis; clean_only gates the trace with is_surge_spec (skips it on failure); conversion is the per-cooldown f_0/V factor."
     header, df = read_daq_file(path, filename)
     dt = header["SCANINTVAL"]
     v = df["CHAN_01(V)"].to_numpy()
@@ -112,5 +131,5 @@ def plot_psd(path, filename, conversion=1, P=(10, 100, 1000, 10000), window="han
             print(f"  {filename} P={p}: segment < 2 pts, skipped"); continue
         f, S = _psd_welch(phi, dt, p, window)
         plt.loglog(f[1:], S[1:], lw=0.8, label=f"P={p}")   # drop the f=0 (DC) bin — invalid on a log axis
-    plt.xlabel("Frequency (Hz)"); plt.ylabel(r"PSD ($\Phi_0^2$/Hz)")
+    plt.xlabel("Frequency (Hz)"); plt.ylabel(r"PSD ($f_0^2$/Hz)")
     plt.title(f"PSD — {filename}"); plt.legend(); plt.tight_layout(); plt.show()

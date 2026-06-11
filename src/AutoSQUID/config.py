@@ -11,6 +11,7 @@ from datetime import datetime
 import os
 
 from .scc import pfl_register
+from .analysis import fmt_npts
 
 
 @dataclass
@@ -27,7 +28,9 @@ class Config:
     rail_v: float = 9.5                 # true-rail catch (V); range-agnostic
     baseline_chunks: int = 1            # first chunk(s) set the baseline mean mu0
     live_jump_check: bool = True        # run the mid-run chunk_jump/rail abort during acquisition
-                                        # (off -> drain the run without it; post-hoc is_surge_spec still gates saves)
+                                        # (off -> drain the run; the prefix is still located post-hoc, same result)
+    min_usable_frac: float = 0.90       # a (truncated) trace counts as a clean trial only if its usable points
+                                        # >= this * n_points (1.0 -> only full-length clean traces count)
 
     # ---- temperature logging ----
     temp_logger: bool = True            # run the background MXC TempLogger thread during acquisition
@@ -68,12 +71,6 @@ class Config:
         return [s] if isinstance(s, (int, float)) else list(s)
 
     @property
-    def npts_tag(self) -> str:
-        "Filename point-count tag, e.g. 10_000_000 -> '10Mpts'."
-        n = self.n_points
-        return f"{n // 1_000_000}Mpts" if n % 1_000_000 == 0 else f"{n}pts"
-
-    @property
     def base_path(self) -> str:
         "Per-user data folder: data_root / user."
         return os.path.join(self.data_root, self.user)
@@ -88,13 +85,14 @@ class Config:
         "The PFL feedback register to use (override, else standard SQUID-locked 0x408)."
         return self.register_override if self.register_override is not None else pfl_register(stage1_locked=True)
 
-    def core_name(self, scan_interval_s: float) -> str:
-        "Date-agnostic identifying core, e.g. '100us_14mK_10Mpts' — matches this (interval, temp, npts) trace on ANY date."
-        return f"{int(round(scan_interval_s * 1e6))}us_{self.temp_label}_{self.npts_tag}"
+    def id_core(self, scan_interval_s: float) -> str:
+        "Interval+temp identity (date- and npts-agnostic) for matching existing traces, e.g. '100us_14mK'."
+        return f"{int(round(scan_interval_s * 1e6))}us_{self.temp_label}"
 
-    def base_name(self, scan_interval_s: float) -> str:
-        "WRITE stem for a new trace, e.g. 'DAQ_Jun01_100us_14mK_10Mpts' (date prefix + core; order index/outcome appended later). Existing traces are MATCHED by core_name, which ignores the date."
-        return f"DAQ_{datetime.now().strftime('%b%d')}_{self.core_name(scan_interval_s)}"
+    def base_name(self, scan_interval_s: float, n_points=None) -> str:
+        "WRITE stem with its point-count tag, e.g. 'DAQ_Jun01_100us_14mK_10Mpts'. npts defaults to the target n_points; pass the usable count for a truncated trace (-> e.g. '8p4Mpts'). Order index / outcome are appended later; traces are MATCHED by id_core (ignores date AND npts)."
+        n = self.n_points if n_points is None else int(n_points)
+        return f"DAQ_{datetime.now().strftime('%b%d')}_{self.id_core(scan_interval_s)}_{fmt_npts(n)}"
 
 
 def require_fields(cfg, names, context):

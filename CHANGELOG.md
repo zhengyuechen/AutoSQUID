@@ -4,6 +4,36 @@ All notable changes to **AutoSQUID** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## 0.2.0 — 2026-06-11
+
+### Changed
+
+* **Jumps are truncated at the source, then re-judged — no more `JUMP`/`RAIL` outcomes; detection owns the boundary.** When a live `chunk_jump` flag fires, `acquire_finite_chunked` drops the offending chunk and returns the strict **clean pre-jump prefix** `buf[:chunk_start]`; that boundary is final and the locator is *not* called. When an acquisition completes **without** a live flag, the **post-hoc locator** (`usable_points_from_spec`) runs regardless of whether `live_jump_check` was on — so a slip the live check missed, or any run drained with live checking off, is still located. The prefix gets a **post-run surge check** (`is_surge_spec`) and is labelled **`CLEAN`** / **`SURGE`** / **`DEAD`** — a `DEAD` (0-point) prefix is **ledgered but never written to disk**. Filename suffixes are now only nothing, `_SURGE`, or `_BADBASE` (bad-baseline unchanged — systemic, stops the sweep).
+* **The post-hoc locator is INDEPENDENT of `is_surge_spec`** (they only share `_chunk_stats`). `usable_points_from_spec` scans every chunk with **absolute** thresholds (`rail_v`, `|mu-mu0| > jump_v`, freeze vs a robust 95th-pct noise level) and cuts at the **onset of the persistent failing run that reaches the end** — walking back from the end and permitting up to `gap_tol` **consecutive** clean chunks (internal default `3`); recovery requires **more than** `gap_tol` consecutive clean chunks, so a *latched* jump/rail/freeze is cut but a *transient that recovers* is kept. It catches a slip the live check missed, and no longer over-truncates a transient. This persistence applies wherever the locator runs (any acquisition that finished without a live flag); when a live flag fired, its boundary is taken as-is with no persistence.
+* **Provenance separate from the filename:** the ledger records `event` (the trigger — `JUMP`/`RAIL`/`FROZEN`/`DEAD`/`BAD_BASELINE`/`NONE`, from the live flag or, with live off, the locator's `kind`), `outcome` (integrity of the saved prefix — `SURGE` is reserved for this), and `accepted` (`outcome=CLEAN` **and** `usable_points ≥ min_usable_frac × n_points`, so a clean prefix shorter than that fraction is still ledgered but does **not** count toward `n_trials`). A truncated-but-clean trace is `CLEAN` with e.g. `event=JUMP`, so a slip is never silently lost — including on the no-live-flag path (live-on-but-missed or live-off), where the locator now returns `(usable_points, kind, reason)`.
+* **Resume counting is EXACT, from the ledger** (`scan_indices` / `accepted_trace_names`): it counts the trials the ledger marked `accepted` (set from the precise `usable_points` at write time) whose file still **exists**, and takes the next index from the **filesystem** (never overwrites any existing trace). Immune to filename rounding (e.g. a `min_usable_frac=0.905` trace tagged `9p0Mpts` still counts). `clean_trace_names` uses the same accepted list, so plotting-selection matches counting.
+* **Filename point-count tag = the trace's USABLE points** (`fmt_npts`, one decimal with `p`, e.g. `8p4Mpts`; whole millions stay `10Mpts`). Generic in `cfg.n_points` (10 M, 20 M, …).
+* **`acquire_finite_chunked` returns `buf[:chunk_start]`** on a jump/rail (exact even when the final chunk is short), with `flag = {kind, index, time_s, reason}`.
+* **Robustness:** `is_surge_spec` (and the locator) use a **95th-percentile** noise level instead of `max(std)` (a single noisy chunk no longer false-flags "stuck"); both **guard empty input**; and the **exit reset** (when the final accepted prefix left the lock slipped) now runs through `_reset` — counting `n_resets`, logging, and returning `reset_fail` if it doesn't clear.
+* **Experiment ledger columns:** added `event`, `outcome`, `usable_points`, `usable_seconds`, and `accepted` — `event` is the trigger/provenance, `outcome` the integrity of the saved prefix, `accepted` whether it counts toward `n_trials`. These replace the old `jump_index`/`jump_time_s`; `n_acquired` removed.
+
+### Added
+
+* **`analysis._chunk_stats`** — the single per-chunk analysis (means/stds/rails/baseline) shared by `is_surge_spec` (whole-trace pass/fail) and `usable_points_from_spec` (where the failure begins).
+* **`analysis.usable_points_from_spec(v, …)`** → `(usable_points, kind, reason)` (the clean-prefix locator, run after any acquisition that finished without a live flag); **`analysis.truncate_to_clean(v, fs, **locator_kw)`** → `(clean_v, usable_points, usable_seconds, kind, reason)`.
+* **`analysis.accepted_trace_names(outdir, id_core)`** — the ledger-accepted, on-disk trace filenames for a (interval, temp), in index order.
+* **`analysis.fmt_npts` / `parse_npts`**; **`Config.min_usable_frac`** (default `0.90`).
+* **`plotting.plot_usable(...)`**: plots only the usable (clean pre-failure) part of a trace; **skips `_SURGE` files**. Newly-acquired truncated files already contain *only* their usable prefix, so the discarded-tail overlay is meaningful only for full-length legacy / externally-supplied traces that still hold the post-slip tail.
+
+### Removed
+
+* `Config.report_usable` and the old flag-based `truncate_to_clean(v, fs, chunk, flag)`.
+
+### Fixed
+
+* **`usable_points_from_spec` `gap_tol` off-by-one:** the backward-scan break is now `clean_run > gap_tol` (was `>=`), so `gap_tol` is the number of **consecutive** clean chunks actually tolerated inside a trailing failing run — with `gap_tol=1`, one clean chunk is now tolerated (previously it took `gap_tol=2`).
+* **Flat/dead traces now carry DEAD provenance from the locator.** When the locator's robust noise level is below `min_std` (new `min_std=5e-5` parameter, matching `is_surge_spec`), `usable_points_from_spec` returns `(0, "dead", reason)` instead of `(full_length, None, "ok")`. A fully flat trace is therefore labelled `event=DEAD` / `outcome=DEAD` (0-point prefix → not saved), instead of being saved as a `_SURGE` file by the downstream integrity gate.
+
 ## 0.1.4 — 2026-06-07
 
 ### Added

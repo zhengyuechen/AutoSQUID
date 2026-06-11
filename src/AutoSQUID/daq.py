@@ -77,8 +77,11 @@ def detect_ai_channel(cfg):
 
 def acquire_finite_chunked(cfg, channel, n, fs):
     """ONE consecutive FINITE read of n samples, drained in cfg.chunk-point reads with the live chunk_jump
-    check (the sample clock is gap-free, so chunking does NOT break the run). Returns
-    (v[:got], got, flag|None) where flag=dict(kind,index,time_s,reason), kind in {jump,rail,bad_baseline}."""
+    check (the sample clock is gap-free, so chunking does NOT break the run). DETECTION OWNS THE BOUNDARY:
+    on a jump/rail, the chunk that tripped the check is dropped and the strict PRE-jump prefix
+    `buf[:chunk_start]` is returned (no jump behavior, no re-detection by any helper); on bad_baseline the
+    short baseline read (including the offending chunk) is returned as-is. Returns (v, got, flag|None)
+    where flag=dict(kind,index,time_s,reason), kind in {jump,rail,bad_baseline} and index is the boundary."""
 
     # The FIFO buffer only holds a few thousand samples, so read_many_sample is not going to interrupt the run.
     # Check out the following on buffers:
@@ -92,7 +95,8 @@ def acquire_finite_chunked(cfg, channel, n, fs):
         reader = AnalogSingleChannelReader(t.in_stream)
         t.start()
         while got < n:
-            m = min(cfg.chunk, n - got)
+            chunk_start = got                       # start of the chunk about to be read = the exact drop boundary
+            m = min(cfg.chunk, n - got)             # the final chunk may be shorter than cfg.chunk
             reader.read_many_sample(buf[got:got + m], number_of_samples_per_channel=m, timeout=m / fs + 10.0)
             res = None
             if check:
@@ -102,15 +106,12 @@ def acquire_finite_chunked(cfg, channel, n, fs):
                     base.append(float(seg.mean()))
                     if len(base) >= cfg.baseline_chunks:
                         mu0 = float(np.mean(base))
-            got += m
             if res:
                 kind, reason = res
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=".*200010.*")
                     t.stop()
-                return buf[:got].copy(), got, {
-                    "kind": kind,
-                    "index": got,
-                    "time_s": got / fs,
-                    "reason": reason}
+                end = (got + m) if kind == "bad_baseline" else chunk_start   # bad_baseline keeps its chunk; jump/rail drops it
+                return buf[:end].copy(), end, {"kind": kind, "index": end, "time_s": end / fs, "reason": reason}
+            got += m
     return buf[:got].copy(), got, None
