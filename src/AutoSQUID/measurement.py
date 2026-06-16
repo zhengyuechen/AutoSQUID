@@ -1,7 +1,7 @@
 """The measurement-cycle state machine: run_cycle (one scan interval). The interval loop lives in the
 notebook (§2); resolve_temp_label sets the auto temperature label before the loop runs.
 
-Collects cfg.n_trials CLEAN traces per interval within cfg.max_attempts real acquisitions; each acquisition
+Collects the active goal's target (cfg.n_trials accepted traces OR cfg.segment_goal clean segments) within cfg.max_attempts acquisitions; each acquisition
 is order-indexed (clean or truncated-clean -> {base}_{i}.txt, surge -> {base}_{i}_SURGE.txt, bad-baseline
 -> {base}_{i}_BADBASE.txt); resumes from
 existing files (never overwrites); a bad-baseline / non-clearing reset is systemic and stops the sweep.
@@ -13,6 +13,7 @@ import serial
 from .analysis import (is_surge_spec, save_pcs102, log_experiment, log_action,
                         scan_indices, format_temp_label, truncate_to_clean)
 from .config import require_fields
+from . import goals
 from .serial_io import fire_reset
 from .daq import acquire_finite_chunked, daq_read
 from .temperature import read_temp, temp_logging, log_temp_now, save_temp_log
@@ -63,8 +64,10 @@ def _classify(cfg, v, flag):
 
 
 def run_cycle(cfg, scan_interval_s):
-    """One scan interval: collect cfg.n_trials CLEAN traces within cfg.max_attempts real acquisitions.
-    Returns 'reset_fail' (a non-clearing/bad-baseline reset -> stop the sweep) or 'ok'."""
+    """One scan interval: pursue the active goal (cfg.n_trials accepted traces OR cfg.segment_goal clean
+    segments) within cfg.max_attempts real acquisitions. Returns 'reset_fail' (a non-clearing/bad-baseline
+    reset -> stop the sweep) or 'ok'."""
+    goals.validate_goal(cfg)                         # exactly one of n_trials / segment_goal; n_points >= seg_len
     require_fields(cfg, ["data_root", "user"], "run_cycle")
     if cfg.temp_label == "auto":
         require_fields(cfg, ["temp_reader"], "run_cycle with temp_label='auto'")
@@ -77,44 +80,52 @@ def run_cycle(cfg, scan_interval_s):
     ledger = cfg.outdir / "experiment_log.txt"
     actionlog = cfg.outdir / "action_log.txt"
     est = cfg.n_points * scan_interval_s
+    mode = goals.goal_mode(cfg)                       # "segment" | "trials" (constant for this interval)
+    seg_len_str = cfg.segment_len if cfg.segment_len is not None else ""
     n_resets = 0
 
     def _log(outcome, **kw):
-        "Append a ledger row, filling the per-interval constants; caller passes the varying fields."
-        log_experiment(ledger, dict(timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
-                       scan_interval_us=tau_us, n_target=cfg.n_points, n_resets=n_resets, outcome=outcome, **kw))
+        "Append a ledger row with the per-interval constants. `n_clean` stays trace-count-only (blank in segment mode); `goal_progress` is the active-unit cumulative (traces or segments); accepted_segments defaults to 0."
+        gp = kw.pop("goal_progress", "")
+        row = dict(timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
+                   scan_interval_us=tau_us, n_target=cfg.n_points, goal_mode=mode,
+                   segment_length=seg_len_str, n_clean=(gp if mode == "trials" else ""),
+                   goal_progress=gp, accepted_segments=0, n_resets=n_resets, outcome=outcome)
+        row.update(kw)
+        log_experiment(ledger, row)
 
     def _action(action, detail=""):
         "Append a line to the action log (actions + attempted names; never measurement results)."
         log_action(actionlog, action, detail)
 
-    def _reset(tag, n_clean):
+    def _reset(tag, progress):
         "reset_and_verify (counts toward n_resets); log RESET with the #tries it took to clear / RESET_FAIL. Returns ok."
         nonlocal n_resets
         ntry = reset_and_verify(cfg); n_resets += 1
         ok = ntry > 0
         _action("RESET" if ok else "RESET_FAIL", f"{ntry} tries" if ok else "not cleared")
         if not ok:
-            _log("RESET_FAIL", n_clean=n_clean, attempt=tag, filename="")
+            _log("RESET_FAIL", goal_progress=progress, attempt=tag, filename="")
         return ok
 
-    n_clean, i = scan_indices(cfg.outdir, id_core)   # exact accepted count from the ledger; next index from the filesystem
-    if n_clean >= cfg.n_trials:
-        print(f"\n=== {base} · already has {n_clean}/{cfg.n_trials} clean; skipping ==="); return "ok"
-    if n_clean or i > 1:
-        print(f"\n=== {base} · resuming: {n_clean}/{cfg.n_trials} clean on disk; next index {i} ===")
-    if not _reset(i, n_clean):
+    progress = goals.scan_progress(cfg.outdir, id_core, cfg)   # accepted traces (trials) or summed segments (segment), from the ledger
+    _, i = scan_indices(cfg.outdir, id_core)                   # next index from the filesystem (never overwrite an existing trace)
+    if goals.is_done(progress, cfg):
+        print(f"\n=== {base} · already has {goals.progress_str(progress, cfg)}; skipping ==="); return "ok"
+    if progress or i > 1:
+        print(f"\n=== {base} · resuming: {goals.progress_str(progress, cfg)} on disk; next index {i} ===")
+    if not _reset(i, progress):
         print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
 
     n_attempts = 0
 
     def _attempt(idx):
-        """One acquisition: acquire -> (post-hoc locate prefix when no live flag fired) -> classify (event +
-        integrity) -> save the NONEMPTY prefix named by its usable point count -> log. A CLEAN trace is
-        `accepted` (counts toward n_trials) only if usable >= cfg.min_usable_frac*n_points.
-        Returns (outcome, accepted, slipped)."""
-        nonlocal n_clean, n_attempts
-        print(f"\n=== {base} · index {idx} · {n_attempts}/{cfg.max_attempts} used · {n_clean}/{cfg.n_trials} clean · "
+        """One acquisition: acquire cfg.n_points -> (post-hoc locate prefix when no live flag fired) ->
+        classify (event + integrity) -> save the NONEMPTY prefix named by its usable point count -> log.
+        Adds goals.contribution(...) to `progress` (1 accepted trace, or floor(usable/seg_len) clean segments).
+        Returns (outcome, slipped)."""
+        nonlocal progress, n_attempts
+        print(f"\n=== {base} · index {idx} · {n_attempts}/{cfg.max_attempts} used · {goals.progress_str(progress, cfg)} · "
               f"{cfg.n_points} pts @ {fs:.0f} Hz (~{est:.0f} s) ===")
         _t0 = datetime.datetime.now()
         print(f"    start {_t0:%H:%M:%S} · expected done ~{_t0 + datetime.timedelta(seconds=est):%H:%M:%S}  (~{est:.0f} s)")
@@ -132,10 +143,11 @@ def run_cycle(cfg, scan_interval_s):
         event, outcome, tag, reason = _classify(cfg, v, flag)
         usable_n = got; usable_s = got / fs
         bad_base = outcome == "BAD_BASELINE"
-        accepted = outcome == "CLEAN" and usable_n >= cfg.min_usable_frac * cfg.n_points
-        slipped = (usable_n < cfg.n_points) or outcome != "CLEAN"   # truncated (any path) or not-clean -> lock slipped
+        contrib = goals.contribution(cfg, outcome, usable_n)              # +1 trace (trials) or +full segments (segment)
+        acc_flag, acc_segs = (0, contrib) if mode == "segment" else (contrib, 0)  # don't overload `accepted` in segment mode
+        slipped = (usable_n < cfg.n_points) or outcome != "CLEAN"         # truncated (any path) or not-clean -> lock slipped
         if not bad_base: n_attempts += 1
-        if accepted:     n_clean += 1
+        progress += contrib
         filename = ""
         if outcome != "DEAD":                                 # save diagnostics only when the prefix is nonempty
             npts_name = cfg.n_points if bad_base else usable_n
@@ -143,28 +155,29 @@ def run_cycle(cfg, scan_interval_s):
             save_pcs102(cfg.outdir / f"{stem}.txt", v, scan_interval_s)
             save_temp_log(cfg, cfg.outdir / (stem.replace("DAQ", "TEMP", 1) + ".csv"), tl.samples)
             filename = f"{stem}.txt"
-        Ts = [s[1] for s in tl.samples] or [float("nan")]
+        Ts = [s[1] for s in tl.samples]                       # no MXC samples (logger off / none collected) -> blank, not nan
+        T0 = f"{Ts[0]:.6f}" if Ts else ""; T1 = f"{Ts[-1]:.6f}" if Ts else ""
         mV = f"{v.mean():.6f}" if len(v) else ""; sV = f"{v.std():.6f}" if len(v) else ""
-        _log(outcome, event=event, n_clean=n_clean, attempt=idx, filename=filename,
-             usable_points=usable_n, usable_seconds=f"{usable_s:.3f}", accepted=int(accepted),
-             mean_V=mV, std_V=sV, T_start_K=f"{Ts[0]:.6f}", T_end_K=f"{Ts[-1]:.6f}")
+        _log(outcome, event=event, goal_progress=progress, attempt=idx, filename=filename,
+             usable_points=usable_n, usable_seconds=f"{usable_s:.3f}", accepted=int(acc_flag),
+             accepted_segments=int(acc_segs), mean_V=mV, std_V=sV, T_start_K=T0, T_end_K=T1)
         print(f"    event={event} outcome={outcome} ({reason}) · idx {idx} · usable={usable_n} pts ({usable_s:.0f}s) · "
-              f"accepted={accepted} · {time.time()-t0:.0f}s · {n_clean}/{cfg.n_trials} clean")
+              f"+{contrib} {goals.unit(cfg)} · {time.time()-t0:.0f}s · {goals.progress_str(progress, cfg)}")
         if bad_base:
             _action("BAD_BASELINE", reason)
-        return outcome, accepted, slipped
+        return outcome, slipped
 
     def _summary():
         "Final per-interval status: DONE, or BUDGET_EXHAUSTED (logs the exhausted ledger row)."
-        if n_clean >= cfg.n_trials:
-            print(f"    DONE: {n_clean}/{cfg.n_trials} clean traces in {n_attempts} acquisition(s) this run.")
+        if goals.is_done(progress, cfg):
+            print(f"    DONE: {goals.progress_str(progress, cfg)} in {n_attempts} acquisition(s) this run.")
         else:
-            _log("BUDGET_EXHAUSTED", n_clean=n_clean, attempt="", filename="")
-            print(f"    BUDGET EXHAUSTED: {n_clean}/{cfg.n_trials} clean after {cfg.max_attempts} acquisitions; moving on.")
+            _log("BUDGET_EXHAUSTED", goal_progress=progress, attempt="", filename="")
+            print(f"    BUDGET EXHAUSTED: {goals.progress_str(progress, cfg)} after {cfg.max_attempts} acquisitions; moving on.")
 
     pending_slip = False
-    while n_clean < cfg.n_trials and n_attempts < cfg.max_attempts:
-        outcome, accepted, slipped = _attempt(i)
+    while not goals.is_done(progress, cfg) and n_attempts < cfg.max_attempts:
+        outcome, slipped = _attempt(i)
         i += 1
         if outcome == "BAD_BASELINE":
             print("    Bad baseline -> reset is not holding (systemic); STOPPING."); return "reset_fail"
@@ -172,12 +185,12 @@ def run_cycle(cfg, scan_interval_s):
         if not slipped:
             continue                              # full clean trace, lock intact -> next acquisition without a reset
         # a truncated (jump/rail) or surged trace -> the lock slipped; reset before the next attempt
-        if n_clean < cfg.n_trials and n_attempts < cfg.max_attempts:
-            if not _reset(i, n_clean):
+        if not goals.is_done(progress, cfg) and n_attempts < cfg.max_attempts:
+            if not _reset(i, progress):
                 print("    Reset did not clear (systemic); STOPPING."); return "reset_fail"
             pending_slip = False                  # cleared by the in-loop reset
-    if pending_slip:                              # the final accepted prefix left the lock slipped -> clear it (via _reset:
-        if not _reset(i, n_clean):                # counts n_resets + logs RESET/RESET_FAIL) before returning
+    if pending_slip:                              # the final acquisition left the lock slipped -> clear it (via _reset:
+        if not _reset(i, progress):               # counts n_resets + logs RESET/RESET_FAIL) before returning
             print("    Exit reset did not clear (systemic); STOPPING."); return "reset_fail"
     _summary()
     return "ok"

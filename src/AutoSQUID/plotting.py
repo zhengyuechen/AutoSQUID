@@ -3,11 +3,15 @@
 Reads everything back from OUTDIR, so it works after a kernel restart and never holds the big arrays in
 memory. Hardware-free (matplotlib + pandas).
 """
+import os
+import re
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from .analysis import read_daq_file, is_surge_spec, usable_points_from_spec, accepted_trace_names
+from .analysis import (read_daq_file, is_surge_spec, usable_points_from_spec, truncate_to_clean,
+                       accepted_trace_names, fmt_npts)
 from .config import require_fields
 
 
@@ -133,3 +137,105 @@ def plot_psd(path, filename, conversion=1, P=(10, 100, 1000, 10000), window="han
         plt.loglog(f[1:], S[1:], lw=0.8, label=f"P={p}")   # drop the f=0 (DC) bin — invalid on a log axis
     plt.xlabel("Frequency (Hz)"); plt.ylabel(r"PSD ($f_0^2$/Hz)")
     plt.title(f"PSD — {filename}"); plt.legend(); plt.tight_layout(); plt.show()
+
+
+def _win_label(seg_len):
+    "Short window-size label for axes/titles: 1_000_000 -> '1M', 2_500_000 -> '2p5M', 1000 -> '1000'."
+    return fmt_npts(int(seg_len)).replace("pts", "")
+
+
+def _seg_temp(fn):
+    "Temperature token parsed from a DAQ filename (between <tau>us_ and _<npts>pts), else '' — e.g. '400mK'."
+    m = re.search(r"_\d+us_([^_]+)_[0-9pM]+pts_", str(fn))
+    return m.group(1) if m else ""
+
+
+def plot_segment_psd_folder(path, scan_interval_us, segment_length, conversion=1,
+                            temp_label=None, locate_usable=True, clean_only=False,
+                            segment_clean_only=False, jump_v=0.5, rail_v=9.5, baseline_chunks=1,
+                            window="hanning", ax=None):
+    """Folder-based (LEDGER-FREE) segment PSDs for one scan interval: find the matching DAQ files in `path`,
+    locate each file's clean pre-jump prefix (default), split that into full `segment_length` blocks, take one
+    one-sided Welch PSD (phi_0^2/Hz) per block, and overlay them — each segment faint gray, the MEAN across all
+    blocks in black. No experiment ledger is read, so it works on old / hand-copied / partially-migrated folders.
+
+    Files are matched as `DAQ_*_{scan_interval_us}us_*pts_*.txt`; `_SURGE`/`_BADBASE` files and any file whose
+    usable prefix is shorter than one `segment_length` are excluded; `temp_label` (e.g. "400mK") further filters
+    by the trace's temp token. `locate_usable` (default True) runs `truncate_to_clean` (with `jump_v`/`rail_v`/
+    `baseline_chunks`) per file and segments only the clean prefix — a NEW AutoSQUID file (already a clean prefix)
+    comes back whole, a LEGACY file saved WITH its post-jump tail is cut before segmentation; set it False to
+    segment each file exactly as saved (debugging raw files). `clean_only` checks the WHOLE located prefix with
+    `is_surge_spec` (skips the file on failure); `segment_clean_only` instead checks each individual
+    `segment_length` window and drops only the failing ones. `conversion` is the per-cooldown phi_0/V factor.
+    NOTE: the blocks are ADJACENT windows of one acquisition, not independent acquisitions — read the spread
+    accordingly. A `segment_clean_only`-dropped window does NOT appear in `meta` (it's left out of the PSD).
+
+    Returns (f, psd_stack, meta): `psd_stack` is (n_segments, n_freq); `meta` has one row per KEPT segment —
+    filename, segment_index, start_point, end_point, scan_interval_us, temp_label, n_points_file, usable_points,
+    usable_seconds, locator_kind, locator_reason, segment_ok, segment_reason."""
+    seg_len = int(segment_length)
+    if seg_len <= 0:
+        raise ValueError("segment_length must be positive")
+    cols = ["filename", "segment_index", "start_point", "end_point", "scan_interval_us", "temp_label",
+            "n_points_file", "usable_points", "usable_seconds", "locator_kind", "locator_reason",
+            "segment_ok", "segment_reason"]
+    pat = re.compile(rf"DAQ_.*_{int(scan_interval_us)}us_.*pts_.*\.txt$")
+    files = sorted(f for f in os.listdir(path)
+                   if pat.match(f) and "_SURGE" not in f and "_BADBASE" not in f
+                   and (temp_label is None or f"_{temp_label}_" in f))
+    f_axis, stack, rows = None, [], []
+    for fn in files:
+        header, df = read_daq_file(path, fn)
+        dt = header["SCANINTVAL"]
+        v = df["CHAN_01(V)"].to_numpy()
+        n_file = len(v)
+        if locate_usable:                                        # cut the clean pre-jump prefix BEFORE segmenting
+            v, usable_n, usable_s, kind, reason = truncate_to_clean(
+                v, 1.0 / dt, jump_v=jump_v, rail_v=rail_v, n_baseline_chunks=baseline_chunks)
+        else:
+            usable_n, usable_s, kind, reason = n_file, n_file * dt, None, "as-saved"
+        if usable_n < seg_len:                                   # not even one full window of usable data
+            continue
+        if clean_only:
+            bad, sreason = is_surge_spec(v)
+            if bad:
+                print(f"[integrity] {fn}: {sreason} -> skipped (clean_only)"); continue
+        tlab = _seg_temp(fn)
+        for k in range(usable_n // seg_len):
+            a, b = k * seg_len, (k + 1) * seg_len
+            seg = v[a:b]
+            segment_ok, segment_reason = True, "ok"
+            if segment_clean_only:
+                bad, segment_reason = is_surge_spec(seg)
+                segment_ok = not bad
+                if bad:
+                    continue                                     # drop ONLY this window (not added to stack/meta)
+            f_axis, S = _psd_welch(seg * conversion, dt, 1, window)
+            stack.append(S)
+            rows.append(dict(filename=fn, segment_index=k, start_point=a, end_point=b,
+                             scan_interval_us=int(scan_interval_us), temp_label=tlab, n_points_file=n_file,
+                             usable_points=int(usable_n), usable_seconds=round(usable_s, 3),
+                             locator_kind=kind or "", locator_reason=reason,
+                             segment_ok=segment_ok, segment_reason=segment_reason))
+    meta = pd.DataFrame(rows, columns=cols)
+    if not stack:
+        print(f"no usable segments at {scan_interval_us}us"
+              + (f" / {temp_label}" if temp_label else "") + f" in {path}")
+        return f_axis, np.empty((0, 0)), meta
+
+    psd_stack = np.array(stack)
+    mean = psd_stack.mean(axis=0)
+    own_ax = ax is None
+    if own_ax:
+        _, ax = plt.subplots(figsize=(7, 5))
+    for S in psd_stack:                                       # raw per-segment PSDs, faint and behind
+        ax.loglog(f_axis[1:], S[1:], lw=0.4, color="0.8")
+    ax.loglog(f_axis[1:], mean[1:], lw=1.4, color="black", label="mean")
+    win = _win_label(seg_len)
+    ax.set_xlabel("Frequency (Hz)"); ax.set_ylabel(r"PSD ($\phi_0^2$/Hz)")
+    ax.set_title(f"Segment PSDs — {scan_interval_us}us" + (f" / {temp_label}" if temp_label else "")
+                 + f"  ({len(psd_stack)} × {win} from {meta['filename'].nunique()} files)")
+    ax.legend()
+    if own_ax:
+        plt.tight_layout(); plt.show()
+    return f_axis, psd_stack, meta

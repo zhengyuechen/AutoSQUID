@@ -206,8 +206,9 @@ def read_daq_file(path, filename):
     return header_info, df
 
 
-LEDGER_COLS = ["timestamp", "scan_interval_us", "n_target", "n_clean", "attempt",
-               "event", "outcome", "usable_points", "usable_seconds", "accepted", "n_resets",
+LEDGER_COLS = ["timestamp", "scan_interval_us", "n_target", "n_clean", "goal_progress", "attempt",
+               "event", "outcome", "usable_points", "usable_seconds", "accepted",
+               "goal_mode", "segment_length", "accepted_segments", "n_resets",
                "mean_V", "std_V", "T_start_K", "T_end_K", "filename"]
 
 
@@ -298,3 +299,179 @@ def scan_indices(outdir, id_core, ledger_name="experiment_log.txt"):
         if m:
             max_idx = max(max_idx, int(m.group(1)))
     return n_clean, max_idx + 1
+
+
+def _segment_rows(outdir, id_core, segment_length, ledger_name="experiment_log.txt"):
+    """{trace_index: (filename, accepted_segments)} for SEGMENT-mode ledger rows of this (interval,temp)
+    `id_core` at this EXACT `segment_length` whose file still exists (deduped by index). The shared
+    primitive behind segment_progress / segment_trace_names. Requiring goal_mode=='segment' AND a matching
+    segment_length keeps trials-mode rows and other window sizes (a later 2M goal) out of the count."""
+    outdir = Path(outdir)
+    ledger = outdir / ledger_name
+    if not ledger.exists():
+        return {}
+    _migrate_ledger(ledger)
+    try:
+        df = pd.read_csv(ledger, sep="\t", dtype=str)
+    except Exception:                                      # noqa: BLE001
+        return {}
+    if not {"filename", "accepted_segments", "segment_length", "goal_mode"}.issubset(df.columns):
+        return {}
+    pat = re.compile(rf"DAQ_(?:[^_]+_)?{re.escape(id_core)}_[0-9pM]+pts_(\d+)(?:_[A-Z]+)?\.txt")
+    rows = {}
+    for fn, seg, slen, gm in zip(df["filename"].fillna(""), df["accepted_segments"].fillna(""),
+                                 df["segment_length"].fillna(""), df["goal_mode"].fillna("")):
+        m = pat.fullmatch(str(fn))
+        if not (m and str(gm) == "segment" and (outdir / str(fn)).exists()):
+            continue
+        try:
+            if int(float(slen)) != int(segment_length):
+                continue
+            ns = int(float(seg)) if str(seg).strip() != "" else 0
+        except (ValueError, TypeError):
+            continue
+        rows[int(m.group(1))] = (str(fn), ns)
+    return rows
+
+
+def segment_progress(outdir, id_core, segment_length, ledger_name="experiment_log.txt"):
+    """Segment-mode resume count: sum of `accepted_segments` the ledger recorded for this (interval,temp)
+    `id_core` in SEGMENT mode AT THIS EXACT `segment_length`, over rows whose file still exists (deduped by
+    index). Exact (ledger usable_points-derived, never filenames)."""
+    return sum(ns for _fn, ns in _segment_rows(outdir, id_core, segment_length, ledger_name).values())
+
+
+def segment_trace_names(outdir, id_core, segment_length, ledger_name="experiment_log.txt"):
+    """Filenames (index order) of SEGMENT-mode traces that contributed >=1 full `segment_length` window for
+    this (interval,temp) `id_core` and still exist on disk. The segment-mode analogue of accepted_trace_names
+    (segment mode sets accepted=0, so accepted_trace_names finds nothing) — for Phase-2 segment plotting."""
+    rows = _segment_rows(outdir, id_core, segment_length, ledger_name)
+    return [rows[k][0] for k in sorted(rows) if rows[k][1] > 0]
+
+
+def backfill_ledger(outdir, cfg=None, segment_length=None, dry_run=True):
+    """Reconstruct MISSING ledger VALUES after the fact — distinct from _migrate_ledger, which only makes the
+    COLUMNS exist. For each row, fill ONLY currently-blank fields it can confidently infer; NEVER overwrite a
+    present value, NEVER invent `timestamp`/`n_resets`/`event`, NEVER write `nan`. Physics/data fields come from
+    the saved DAQ `.txt` (read only when one of them is blank); `T_start_K`/`T_end_K` only from a matching
+    `TEMP_*.csv`; goal fields only from context (`cfg` and/or `segment_length`, else an existing per-row value).
+    `goal_progress` (and trials-mode `n_clean`) are filled as the running cumulative over rows in ledger order.
+
+    cfg (optional) supplies goal_mode (segment if cfg.segment_goal else trials), segment_length (cfg.segment_len),
+    n_points, and min_usable_frac. `segment_length` arg overrides/provides the window size when no cfg is given.
+    Returns a list of {"filename", "filled": {col: value}} for the rows that changed; with dry_run=True (default)
+    the ledger is NOT written — explicit on purpose, since post-run inference can be wrong if files were edited."""
+    outdir = Path(outdir)
+    ledger = outdir / "experiment_log.txt"
+    if not ledger.exists():
+        return []
+    _migrate_ledger(ledger)
+    df = pd.read_csv(ledger, sep="\t", dtype=str).fillna("")
+    rows = df.to_dict("records")
+
+    ctx_mode = ""
+    if cfg is not None:
+        ctx_mode = "segment" if cfg.segment_goal is not None else "trials" if cfg.n_trials is not None else ""
+    ctx_seg = (int(segment_length) if segment_length is not None
+               else int(cfg.segment_len) if (cfg is not None and cfg.segment_len is not None) else None)
+    ctx_npts = int(cfg.n_points) if cfg is not None else None
+    ctx_frac = float(cfg.min_usable_frac) if cfg is not None else None
+
+    def _blank(v):
+        return v is None or str(v).strip() in ("", "nan")
+
+    def _int(v):
+        return int(float(v)) if not _blank(v) else None
+
+    idx_pat = re.compile(r"_(\d+)(?:_[A-Z]+)?\.txt$")
+    running_progress, running_clean, changes = 0, 0, []
+
+    for row in rows:
+        fn = row.get("filename", "")
+        filled = {}
+        on_disk = bool(fn) and (outdir / fn).exists()
+
+        def _eff(col):
+            return filled.get(col, row.get(col, ""))
+
+        # --- goal_mode / segment_length context (row value wins; else cfg/arg) ---
+        gm = row.get("goal_mode", "") or ctx_mode
+        if _blank(row.get("goal_mode")) and gm:
+            filled["goal_mode"] = gm
+        if _blank(row.get("segment_length")) and gm == "segment" and ctx_seg is not None:
+            filled["segment_length"] = str(ctx_seg)
+        slen_i = _int(_eff("segment_length"))
+
+        if _blank(row.get("n_target")) and ctx_npts is not None:
+            filled["n_target"] = str(ctx_npts)
+
+        # --- data-derived fields from the DAQ file (read it only if one of them is blank) ---
+        if on_disk and any(_blank(row.get(c)) for c in
+                           ("usable_points", "usable_seconds", "scan_interval_us", "mean_V", "std_V", "outcome")):
+            try:
+                header, dfv = read_daq_file(str(outdir), fn)
+                v = dfv.iloc[:, 0].to_numpy(dtype=float)
+            except Exception:                                      # noqa: BLE001
+                header, v = None, None
+            if header is not None and v is not None:
+                up = int(header.get("DATAPOINTS", len(v))); si = float(header["SCANINTVAL"])
+                if _blank(row.get("usable_points")):    filled["usable_points"] = str(up)
+                if _blank(row.get("usable_seconds")):   filled["usable_seconds"] = f"{up * si:.3f}"
+                if _blank(row.get("scan_interval_us")): filled["scan_interval_us"] = str(int(round(si * 1e6)))
+                if len(v):
+                    if _blank(row.get("mean_V")):  filled["mean_V"] = f"{v.mean():.6f}"
+                    if _blank(row.get("std_V")):   filled["std_V"] = f"{v.std():.6f}"
+                    if _blank(row.get("outcome")):
+                        surged, _ = is_surge_spec(v)
+                        filled["outcome"] = "SURGE" if surged else "CLEAN"
+
+        usable_i = _int(_eff("usable_points")); outcome = _eff("outcome")
+
+        if _blank(row.get("attempt")) and fn:
+            m = idx_pat.search(fn)
+            if m:
+                filled["attempt"] = m.group(1)
+
+        # --- accepted / accepted_segments + cumulative goal_progress / n_clean ---
+        contrib = None
+        if gm == "segment" and slen_i:
+            if _blank(row.get("accepted_segments")) and usable_i is not None and outcome in ("CLEAN", "SURGE", "DEAD"):
+                filled["accepted_segments"] = str((usable_i // slen_i) if outcome == "CLEAN" else 0)
+            contrib = _int(_eff("accepted_segments"))
+        elif gm == "trials":
+            if _blank(row.get("accepted")) and usable_i is not None and outcome in ("CLEAN", "SURGE", "DEAD") \
+                    and ctx_npts is not None and ctx_frac is not None:
+                filled["accepted"] = str(1 if (outcome == "CLEAN" and usable_i >= ctx_frac * ctx_npts) else 0)
+            contrib = _int(_eff("accepted"))
+        if contrib is not None:
+            running_progress += contrib
+            if _blank(row.get("goal_progress")):
+                filled["goal_progress"] = str(running_progress)
+            if gm == "trials":
+                running_clean += contrib
+                if _blank(row.get("n_clean")):
+                    filled["n_clean"] = str(running_clean)
+
+        # --- temperature only from a matching TEMP_*.csv (never nan) ---
+        if on_disk and (_blank(row.get("T_start_K")) or _blank(row.get("T_end_K"))):
+            temp_csv = outdir / (fn[:-4].replace("DAQ", "TEMP", 1) + ".csv")
+            if temp_csv.exists():
+                try:
+                    t = pd.read_csv(temp_csv)
+                    if len(t):
+                        Tcol = t.columns[-1]                       # (time_s, T_K) -> last column is T
+                        if _blank(row.get("T_start_K")): filled["T_start_K"] = f"{float(t[Tcol].iloc[0]):.6f}"
+                        if _blank(row.get("T_end_K")):   filled["T_end_K"] = f"{float(t[Tcol].iloc[-1]):.6f}"
+                except Exception:                                  # noqa: BLE001
+                    pass
+
+        if filled:
+            row.update(filled)
+            changes.append({"filename": fn, "filled": filled})
+
+    if not dry_run and changes:
+        with open(ledger, "w") as f:
+            f.write("\t".join(LEDGER_COLS) + "\n")
+            for row in rows:
+                f.write("\t".join(str(row.get(c, "")) for c in LEDGER_COLS) + "\n")
+    return changes

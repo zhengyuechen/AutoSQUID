@@ -18,9 +18,12 @@ from .analysis import fmt_npts
 class Config:
     # ---- acquisition ----
     scan_interval_s: Union[float, List[float]] = field(default_factory=lambda: [100e-6])  # one cycle per entry
-    n_points: int = 10_000_000          # length of the consecutive run
+    n_points: int = 10_000_000          # physical DAQ run length (BOTH modes); segment_goal never changes this
     temp_label: str = "auto"            # "auto" -> read+round the current MXC temperature; or a literal e.g. "14mK"
-    n_trials: int = 2                   # target number of CLEAN traces per scan interval
+    # ---- target: set EXACTLY ONE of n_trials / segment_goal (comment the other out in the notebook §0) ----
+    n_trials: Optional[int] = None      # GOAL A: stop after this many accepted full traces per scan interval
+    segment_goal: Optional[tuple] = None  # GOAL B: (n_segments, segment_length) e.g. (20, 1_000_000) -> stop after N full clean
+                                        #         segment_length windows harvested from the n_points runs (NOT the run length)
 
     # ---- live jump check ----
     chunk: int = 100_000                # points per read = jump-check cadence (does NOT break the consecutive run)
@@ -84,6 +87,11 @@ class Config:
     def register(self) -> int:
         "The PFL feedback register to use (override, else standard SQUID-locked 0x408)."
         return self.register_override if self.register_override is not None else pfl_register(stage1_locked=True)
+
+    @property
+    def segment_len(self) -> Optional[int]:
+        "Analysis-window length in segment mode (segment_goal[1]); None in trials mode. NEVER the DAQ run length."
+        return self.segment_goal[1] if self.segment_goal is not None else None
 
     def id_core(self, scan_interval_s: float) -> str:
         "Interval+temp identity (date- and npts-agnostic) for matching existing traces, e.g. '100us_14mK'."

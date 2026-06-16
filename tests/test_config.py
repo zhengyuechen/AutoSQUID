@@ -36,6 +36,19 @@ class TestDerived:
         assert Config(register_override=0x40C).register == 0x40C
 
 
+class TestSegmentLen:
+    def test_trials_mode_segment_len_none(self):
+        assert Config(n_trials=2).segment_len is None
+
+    def test_segment_mode_segment_len(self):
+        assert Config(segment_goal=(20, 1_000_000)).segment_len == 1_000_000
+
+    def test_base_name_uses_run_length_not_segment(self):
+        # segment_goal is the stopping target, NOT the DAQ run length -> base_name reflects n_points
+        cfg = Config(temp_label="14mK", n_points=10_000_000, segment_goal=(20, 1_000_000))
+        assert cfg.base_name(500e-6).endswith("_500us_14mK_10Mpts")
+
+
 class TestRequireFields:
     def test_raises_listing_missing(self):
         with pytest.raises(RuntimeError, match="data_root"):
